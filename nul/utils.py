@@ -1,15 +1,12 @@
-import json
 import math
 import re
 from collections import Counter
 
 import numpy as np
 import torch
-import yaml
 from foc import *
 from ouch import *
 from tokenizers import ByteLevelBPETokenizer, CharBPETokenizer, Tokenizer
-from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 
