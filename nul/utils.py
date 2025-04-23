@@ -10,9 +10,9 @@ from tokenizers import ByteLevelBPETokenizer, CharBPETokenizer, Tokenizer
 from torch.utils.data import DataLoader, TensorDataset
 
 
-# ----------------------
+# -----------
 # jamo-tools
-# ----------------------
+# -----------
 def charset():
     base = [
         flat(0x0009, 0x000A, 0x000D, 0x0020),  # whitespaces
@@ -195,9 +195,9 @@ def from_jamos(xs):
             i = update(i, res, 2)
 
 
-# ----------------------
+# ----------
 # tokenizer
-# ----------------------
+# ----------
 @fx
 def refine(
     text,
@@ -294,8 +294,13 @@ def eot(x=""):
 
 
 def pad():
-    """return the special token '<|pad|>'"""
+    """return the special token '<|pad|>': padding"""
     return "<|pad|>"
+
+
+def unk():
+    """return the special token '<|unk|>': out-of-vocab"""
+    return "<|unk|>"
 
 
 def read_tok(from_json=None, from_str=None):
@@ -310,35 +315,37 @@ def read_tok(from_json=None, from_str=None):
         error("Error, no given tokenizer to load")
 
 
+def stream(src, from_str=False, jamo=False, size=2 << 10, **ref):
+    chunks = flat(
+        chunks_str(size, from_str)
+        if from_str
+        else (chunks_file(size, f) for f in flat(src))
+    )
+    refiner = refine(jamo=jamo, **ref)
+    for chunk in chunks:
+        yield refiner(chunk)
+
+
 def train_tok(
-    from_src=None,
-    from_str=None,
-    byte_level=False,
+    src,
+    from_str=False,
+    byte_level=True,
     size_vocab=5000,
+    size_chunk=2 << 10,
     min_frequency=2,
     dropout=None,
     to_file=None,
-    **refine_conf,  # e.g., custom=rf"\s?<\|unk\|>|<\|pad\|>\s?"
+    **ref,  # e.g., custom=rf"\s?<\|unk\|>|<\|pad\|>\s?"
 ):
     """train a byte|char BPE tokenizer"""
-    guard(
-        from_src or from_str,
-        f"nothing to train, from_src={from_src}, from_str={from_str}",
+    special_tokens = [unk(), pad(), eop(), eot()]
+    iterator = stream(
+        src,
+        from_str=from_str,
+        jamo=not byte_level,
+        size=size_chunk,
+        **ref,
     )
-    special_tokens = ["<|unk|>", "<|pad|>", "<|endofprompt|>", "<|endoftext|>"]
-
-    def data(jamobase):
-        size = 2 << 10
-        refiner = refine(jamo=jamobase, **refine_conf)
-        for d in flat(
-            chars(charset()),  # default charset
-            (
-                chunks_str(size, from_str)
-                if from_str
-                else (chunks_file(size, f) for f in flat(from_src))
-            ),
-        ):
-            yield refiner(d)
 
     def bytetok():
         t = ByteLevelBPETokenizer(
@@ -347,7 +354,7 @@ def train_tok(
             dropout=dropout,
         )
         t.train_from_iterator(
-            data(jamobase=False),
+            iterator,
             vocab_size=size_vocab,
             min_frequency=min_frequency,
             special_tokens=special_tokens[1:],
@@ -356,13 +363,13 @@ def train_tok(
 
     def chartok():
         t = CharBPETokenizer(
-            unk_token="<|unk|>",
+            unk_token=unk(),
             bert_normalizer=False,
             split_on_whitespace_only=True,
             dropout=dropout,
         )
         t.train_from_iterator(
-            data(jamobase=True),
+            iterator,
             vocab_size=size_vocab,
             initial_alphabet=list(charset()),
             limit_alphabet=len(charset()),
@@ -409,7 +416,7 @@ def from_ids(t):
     """
     return cf_(
         id if is_byte_tok(t) else from_jamos,
-        t.decode,
+        lambda x: t.decode(x),
     )
 
 
@@ -419,15 +426,15 @@ def vocab_freq(t, d):
     return cf_(Counter, flatl, map(to_tokens(t)))(d)
 
 
-# ----------------------
-# aa-utils
-# ----------------------
+# ----------
+# nul-utils
+# ----------
 
 
 @fx
 def dumper(x, **kwargs):
     print()
-    nprint(x | dmap(**kwargs), _cols=16, _width=120, _sort=False)
+    pp(x | dmap(**kwargs), margin=16, width=120, sort=False)
     print()
 
 
@@ -452,15 +459,15 @@ def context_mask(x, ieop, ieos, ipad, device="cpu"):
     for i in range(B):
         p = (x[i] == ieop).nonzero(as_tuple=True)[0]
         s = (x[i] == ieos).nonzero(as_tuple=True)[0]
-        P = p[-1] if len(p) > 0 else -1  # where the last [EOP] is found
-        S = s[-1] if len(s) > 0 else -1  # where the last [EOT] is found
+        P = p[-1] if len(p) > 0 else -1  # where the last <eop> is found
+        S = s[-1] if len(s) > 0 else -1  # where the last <eot> is found
 
         if P >= 0 and S > P:
-            mask[i, P + 1 : S + 1] = 1  # [EOP]...[EOT]
+            mask[i, P + 1 : S + 1] = 1  # <eop>...<eot>
         elif P >= 0:
-            mask[i, P + 1 :] = 1  # [EOP]...]
+            mask[i, P + 1 :] = 1  # <eop>...]
         elif S >= 0:
-            mask[i, : S + 1] = 1  # [...[EOT]
+            mask[i, : S + 1] = 1  # [...<eot>
         else:
             mask[i, :] = 1  # open the entire tokens
         mask[i, x[i] == ipad] = 0  # masking pad tokens
@@ -513,10 +520,10 @@ def normalize(x, dim=1, eps=1e-7):
     return x / (x.norm(dim=dim, keepdim=True) + eps)
 
 
-def decay_lr(it, lr, lr_min, steps, warmup, decay):
-    """learning rate decay scheduler (cosine with warmup)"""
-    if not decay:
-        return lr
+@fx
+def sched_lr(it, lr=1e-3, lr_min=1e-5, steps=10000, warmup=1000):
+    """Learning rate scheduler (cosine-annealing with warmup)"""
+    it %= steps
     if it < warmup:
         return lr * it / warmup
     if it > steps:

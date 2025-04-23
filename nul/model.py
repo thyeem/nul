@@ -20,7 +20,7 @@ class Decoder(nn.Module):
     def forward(self, mask, x):
         return cf_(
             self.dropout,
-            cf_(*[f_(layer, mask) for layer in self.layers]),
+            cf_(*[f_(layer, mask) for layer in rev(self.layers)]),
             self.ln,
         )(x)
 
@@ -53,9 +53,9 @@ class Block(nn.Module):
     @staticmethod
     def sublayer(core, layer_norm, x):
         return cf_(
-            layer_norm,  # layer-norm
             _ + x,  # residual connection
             core,  # core-fn
+            layer_norm,  # layer-norm
         )(x)
 
     def forward(self, mask, x):
@@ -153,13 +153,13 @@ class SelfAttention(nn.Module):
         return cf_(
             self.dropout,  # dropout of layer's output
             self.c_proj,  # linear projection
-            g_(_.view)(B, S, E),  # (B,S,N,H) -> (B,S,E)
+            ob(_.view)(B, S, E),  # (B,S,N,H) -> (B,S,E)
             torch.Tensor.contiguous,  # contiguos in-memory tensor
-            g_(_.transpose)(1, 2),  # (B,S,N,H)
+            ob(_.transpose)(1, 2),  # (B,S,N,H)
             _ @ v,  # (B,N,S,S) x (B,N,S,H) -> (B,N,S,H)
             self.dropout_attn,  # attention dropout
             f_(F.softmax, dim=-1),  # softmax
-            g_(_.masked_fill)(mask == 0, float("-inf")),  # no-look-ahead
+            ob(_.masked_fill)(mask == 0, float("-inf")),  # no-look-ahead
             _ / math.sqrt(k.size(-1)),  # / sqrt(d_k)
             _ @ k.transpose(-2, -1),  # Q @ K^T -> (B,N,S,S)
         )(q)

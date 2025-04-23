@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from .utils import *
 
 
-def process(model, method, size_block, size_seq, stopper, x, stat=False):
+def process(model, decoder, size_block, size_seq, stopper, x, stat=False):
     """Autoregressive generation process"""
 
     @torch.no_grad()
@@ -13,7 +13,7 @@ def process(model, method, size_block, size_seq, stopper, x, stat=False):
         model.eval()
         for _ in range(size_seq):
             logits = model(cutoff(x, size_block))[:, -1, :]
-            y, prob = method(logits)  # autoregressive text-gen method
+            y, prob = decoder(logits)  # autoregressive text-gen method
             x = torch.cat((x, y), dim=1)
             probs.append(prob)
             if stopper and y.item() == stopper:  # early-stop condition
@@ -30,14 +30,7 @@ def process(model, method, size_block, size_seq, stopper, x, stat=False):
 
 
 @torch.no_grad()
-def decode_greedy(logits):
-    """decode by greedy method"""
-    probs, ix = F.softmax(logits, dim=-1).topk(1)
-    return ix, probs.item()
-
-
-@torch.no_grad()
-def decode_sample(t, k, p, logits):
+def infer(t, k, p, logits):
     """decode by sampling: pick the next token from a probability dist"""
     probs = F.softmax(
         adjust_logits(t, k, p, logits),

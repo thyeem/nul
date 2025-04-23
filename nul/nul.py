@@ -24,6 +24,10 @@ def nulconf(conf=None, **kwds):
         bias=True,
         dropout=0.1,
         seed=42,
+        size_chat=64,
+        top_k=100,
+        top_p=0.9,
+        temperature=0.5,
         tokenizer="t/bbpe.json",
     )
 
@@ -38,9 +42,9 @@ def nulconf(conf=None, **kwds):
 
 
 class nul(nn.Module):
-    # -------------------
-    # Setup/Info
-    # -------------------
+    # -----------
+    # setup/info
+    # -----------
     @classmethod
     def new(cls, conf=None, **kwds):
         """Create a new model"""
@@ -131,9 +135,9 @@ class nul(nn.Module):
         dumper(dict(num_params=f"{self.numel:_}"))
         dumper(self.conf)
 
-    # -------------------
-    # Fundamental
-    # -------------------
+    # ------------
+    # fundamental
+    # ------------
     @torch.no_grad()
     def to_ids(self, x):
         """from string to tensor"""
@@ -146,10 +150,10 @@ class nul(nn.Module):
         """from tensor to string"""
         return cf_(
             unwords,
-            map(cf_(from_ids(self.tokenizer), list)),
+            map(cf_(from_ids(self.tokenizer), ob(_.tolist)())),
         )(torch.unbind(x, dim=0))
 
-    def forward(self, x):
+    def forward(self, x, embedding=False):
         """forward
         input(B,S) -> logits(B,S,V)
         """
@@ -157,7 +161,7 @@ class nul(nn.Module):
         B, S = x.size()  # batch size, sequence length
         mask = attention_mask(x, self.tokenizer.token_to_id(pad()))
         return cf_(
-            self.lm_head,  # (B,S,E) -> (B,S,V)
+            id if embedding else self.lm_head,  # (B,S,E) -> (B,S,V)
             self.transformer.ln,
             f_(self.transformer.decoder, mask),  # (B,S,E)
             _ + self.pos(S),  # W_p[:,t]: (B,S,E) + (1,S,E)
@@ -175,44 +179,43 @@ class nul(nn.Module):
     @torch.no_grad()
     def embed(self, x, mean=True, norm=True):
         """Get embedding"""
+        self.eval()
         return cf_(
             lambda x: x.mean(dim=1) if mean else x,
             f_(normalize, dim=2) if norm else id,
-            self._forward,
+            f_(self.forward, embedding=True),
         )(x)
 
-    @torch.no_grad()
-    def _forward(self, x):
-        """"""
-        self.eval()
-        x = cutoff(x, self.conf.size_block)
-        S = x.size(1)
-        mask = attention_mask(x, self.tokenizer.token_to_id(pad()))
+    def chat(
+        self,
+        x,
+        size_chat=None,
+        top_k=None,
+        top_p=None,
+        temperature=None,
+        early_stop=eot(),
+        stat=False,
+    ):
+        """generate a sequence"""
+        size_chat = size_chat or self.conf.size_chat or self.conf.size_block
+        stopper = early_stop or self.tokenizer.token_to_id(stopper)
+        decoder = f_(
+            infer,
+            temperature or self.conf.temperature,
+            top_k or self.conf.top_k,
+            top_p or self.conf.top_p,
+        )
+        processor = f_(
+            process,  # text generator
+            self,  # model
+            decoder,  # autoregressive decoder
+            self.conf.size_block,  # length of window
+            size_chat,  # length of chat
+            stopper,  # token-id for early-stop
+            stat=stat,  # flag for generating stats
+        )
         return cf_(
-            self.transformer.ln,
-            f_(self.transformer.decoder, mask),
-            _ + self.pos(S),
-            self.transformer.wte,
-        )(x)
-
-    @torch.no_grad()
-    def broca(self, x, stat=False):
-        "Broca's area in the frontal lobe"
-        self.eval()
-        return cf_(
-            lambda x: process(
-                self,
-                f_(
-                    decode_sample,
-                    self.conf.temperature,
-                    self.conf.top_k,
-                    self.conf.top_p,
-                ),
-                self.conf.size_block,
-                3,
-                None,
-                x,
-                stat=stat,
-            ),
-            self.lm_head,
+            lambda x: dict(x, text=self.from_ids(x.o)) if stat else self.from_ids(x),
+            processor,
+            self.to_ids,
         )(x)
