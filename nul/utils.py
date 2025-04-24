@@ -1,4 +1,5 @@
 import math
+import os
 import re
 from collections import Counter
 
@@ -7,6 +8,7 @@ import torch
 from foc import *
 from ouch import *
 from tokenizers import ByteLevelBPETokenizer, CharBPETokenizer, Tokenizer
+from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -450,7 +452,7 @@ def attention_mask(x, ipad=0):
 
 
 @torch.no_grad()
-def context_mask(x, ieop, ieos, ipad, device="cpu"):
+def context_mask(x, ipad, ieop, ieot, device="cpu"):
     """generate a mask that ignores context tokens.
     'x' tensor must be the target part of a teacher-forcing pair.
     """
@@ -458,7 +460,7 @@ def context_mask(x, ieop, ieos, ipad, device="cpu"):
     mask = torch.zeros_like(x, dtype=torch.bool, device=device)
     for i in range(B):
         p = (x[i] == ieop).nonzero(as_tuple=True)[0]
-        s = (x[i] == ieos).nonzero(as_tuple=True)[0]
+        s = (x[i] == ieot).nonzero(as_tuple=True)[0]
         P = p[-1] if len(p) > 0 else -1  # where the last <eop> is found
         S = s[-1] if len(s) > 0 else -1  # where the last <eot> is found
 
@@ -555,3 +557,40 @@ def tloader(x, batch_size=1, shuffle=True, **kwargs):
         else x
     )
     return DataLoader(t, batch_size=batch_size, shuffle=shuffle, **kwargs)
+
+
+def excerpt_text(src, length):
+    fs = [reader(f, mode="rb") for f in flat(src)]
+    sizes = [os.path.getsize(f) for f in flat(src)]
+    while True:
+        i = randint(len(fs))
+        f = fs[i]
+        start = randint(sizes[i] - length - 1)
+        f.seek(start)
+        yield f.read(length).decode("utf-8", errors="ignore")
+
+
+@torch.no_grad()
+def batch_from_g(g, size_batch, size_block, encoder, ipad=0, device="cpu"):
+    """get a mini-batch (x[B, W], target[B, W]) from a given source"""
+
+    def pad_(t, size, ipad=ipad):
+        if t.size(-1) < size:
+            return F.pad(t, (0, size - t.size(-1)), value=ipad)
+        return t
+
+    B = size_batch
+    W = size_block
+    while True:
+        yield mapl(
+            torch.stack,
+            zip(
+                *[
+                    cf_(
+                        lambda x: (pad_(x[..., :W], W), pad_(x[..., 1 : W + 1], W)),
+                        lambda x: encoder(next(x))[..., -W - 1 :].squeeze(),
+                    )(g)
+                    for _ in range(B)
+                ]
+            ),
+        )

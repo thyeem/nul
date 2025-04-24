@@ -5,52 +5,41 @@ from torch.nn import functional as F
 from .utils import *
 
 
-def process(model, decoder, size_block, size_seq, stopper, x, stat=False):
+@torch.no_grad()
+def process(model, size_seq, temperature, k, p, stopper, x):
     """Autoregressive generation process"""
-
-    @torch.no_grad()
-    def do(x, probs):
-        model.eval()
-        for _ in range(size_seq):
-            logits = model(cutoff(x, size_block))[:, -1, :]
-            y, prob = decoder(logits)  # autoregressive text-gen method
-            x = torch.cat((x, y), dim=1)
-            probs.append(prob)
-            if stopper and y.item() == stopper:  # early-stop condition
-                break
-        return x, probs
-
-    r = x.size(1)
-    text, probs = do(x, [])
-    i, o = text[:, :r], text[:, r:]
-    if stat:
-        return qual(i, o, probs, model.cosim)
-    else:
-        return o
+    model.eval()
+    count = 0
+    for _ in range(size_seq):
+        logits = model(x)[:, -1, :]
+        y = infer(logits, temperature, k, p)
+        x = torch.cat((x, y), dim=1)
+        count += 1
+        if stopper and y.item() == stopper:  # early-stop condition
+            break
+    return x[..., -count:]
 
 
 @torch.no_grad()
-def infer(t, k, p, logits):
+def infer(logits, t, k, p):
     """decode by sampling: pick the next token from a probability dist"""
+    if t == 0:
+        return logits.argmax(dim=-1, keepdim=True)
+    logits /= t
+    logits = logits - logits.max(dim=-1, keepdim=True).values
     probs = F.softmax(
-        adjust_logits(t, k, p, logits),
+        cf_(  # 0 means that the filter is off
+            f_(topp, p) if p != 0 else id,
+            f_(topk, k) if k != 0 else id,
+        )(logits),
         dim=-1,
     )
-    ix = torch.multinomial(probs, num_samples=1)
-    return ix, probs.gather(-1, ix).item()
+    return torch.multinomial(probs, num_samples=1)
 
 
 @torch.no_grad()
-def adjust_logits(t, k, p, logits):
-    return cf_(  # 0 means that the filter is off
-        f_(top_p, p) if p != 0 else id,
-        f_(top_k, k) if k != 0 else id,
-    )(logits / t)
-
-
-@torch.no_grad()
-def top_k(k, logits):
-    """top_k filter: keep the top 'k' tokens with higher probability"""
+def topk(k, logits):
+    """top-k filter: keep the top 'k' tokens with higher probability"""
     logits[
         logits
         < fst(
@@ -61,7 +50,7 @@ def top_k(k, logits):
 
 
 @torch.no_grad()
-def top_p(p, logits):
+def topp(p, logits):
     """nucleus filter: keep the top tokens LT cumulative probability of 'p'"""
     lg, ix = torch.sort(logits, descending=True)
     probs = torch.cumsum(F.softmax(lg, dim=-1), dim=-1)

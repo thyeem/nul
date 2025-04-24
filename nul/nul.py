@@ -5,30 +5,41 @@ import torch
 import torch._dynamo
 from foc import *
 from ouch import *
+from rich.console import Console
 from torch import nn
 
 from .inference import *
 from .model import Decoder, LayerNorm
 from .utils import *
 
+con = Console(width=100)
+
 
 def nulconf(conf=None, **kwds):
     o = dmap(
         strict=True,
         size_vocab=4096,
-        size_embed=64,
-        size_block=64,
-        num_layers=4,
-        num_heads=4,
+        size_embed=128,
+        size_block=128,
+        num_layers=8,
+        num_heads=8,
         ratio_ffn=2,
         bias=True,
         dropout=0.1,
         seed=42,
+        texts=[],
+        size_batch=8,
         size_chat=64,
         top_k=100,
         top_p=0.9,
-        temperature=0.5,
-        tokenizer="t/bbpe.json",
+        temperature=0.7,
+        lr=1e-3,
+        lr_min=1e-4,
+        optim="sgd",
+        weight_decay=1e-4,
+        momentum=0.9,
+        betas=(0.9, 0.999),
+        tokenizer="t/cbpe.json",
     )
 
     def quar(x):
@@ -48,28 +59,36 @@ class nul(nn.Module):
     @classmethod
     def new(cls, conf=None, **kwds):
         """Create a new model"""
-        o = nul()
-        o.set_conf(conf, **kwds)
-        o.set_seed()
-        o.set_tokenizer(f=o.conf.tokenizer)
-        o.set_model()
-        o = o.into()
-        return o.optimize()
+        return (
+            nul()
+            .set_conf(conf, **kwds)
+            .set_seed()
+            .set_tokenizer()
+            .set_model()
+            .set_optim()
+            .into()
+            .optimize()
+        )
 
     @classmethod
     def load(self, model):
         """Load the pre-trained"""
         guard(exists(model, "f"), f"Not found model: {model}")
         o = torch.load(model, map_location="cpu")
-        self.set_conf(o["conf"])
-        self.set_seed()
-        self.set_tokenizer(s=o["tokenizer"])
-        self.set_model()
-        self.load_model(o["model"])
-        return self.optimize()
+        return (
+            nul()
+            .set_conf(o["conf"])
+            .set_seed()
+            .set_tokenizer(o["tokenizer"])
+            .set_model()
+            .load_model(o["model"])
+            .set_optim()
+            .optimize()
+        )
 
     def set_conf(self, conf=None, **kwds):
         self.conf = nulconf(conf, **kwds)
+        return self
 
     def set_seed(self, seed=None):
         seed = seed or self.conf.seed
@@ -78,9 +97,14 @@ class nul(nn.Module):
         torch.manual_seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        return self
 
-    def set_tokenizer(self, f=None, s=None):
-        self.tokenizer = read_tok(from_json=f, from_str=s)
+    def set_tokenizer(self, from_str=None):
+        if from_str is None:
+            self.tokenizer = read_tok(from_json=self.conf.tokenizer)
+        else:
+            self.tokenizer = read_tok(from_str=from_str)
+        return self
 
     def set_model(self):
         self.transformer = nn.ModuleDict(
@@ -93,9 +117,39 @@ class nul(nn.Module):
         )
         self.lm_head = nn.Linear(self.conf.size_embed, self.conf.size_vocab, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
+        return self
+
+    def set_optim(self, optim=None):
+        o = self.conf.optim
+        if not o:
+            self.optim = None
+            return self
+        self.optim = dict(
+            sgd=torch.optim.SGD(
+                self.transformer.parameters(),
+                lr=self.conf.lr,
+                weight_decay=self.conf.weight_decay,
+                momentum=self.conf.momentum,
+            ),
+            adamw=torch.optim.AdamW(
+                self.transformer.parameters(),
+                lr=self.conf.lr,
+                betas=self.conf.betas,
+                weight_decay=self.conf.weight_decay,
+            ),
+            adam=torch.optim.Adam(
+                self.transformer.parameters(),
+                lr=self.conf.lr,
+                betas=self.conf.betas,
+            ),
+        ).get(o) or error(f"No such optim supported: {o}")
+        if not self.conf.reset and optim:
+            self.optim.load_state_dict(optim)
+        return self
 
     def load_model(self, model):
         self.load_state_dict(model, strict=self.conf.strict)
+        return self
 
     def into(self, device=None, dtype=None):
         """set a default dtype and device based on availability"""
@@ -105,7 +159,7 @@ class nul(nn.Module):
             else "mps" if torch.backends.mps.is_available() else "cpu"
         )
         dtype = dtype or (
-            torch.bfloat16 if torch.cuda.is_available() else torch.float16
+            torch.bfloat16 if torch.cuda.is_available() else torch.float32
         )
         return self.to(device=device, dtype=dtype)
 
@@ -117,11 +171,11 @@ class nul(nn.Module):
 
     @property
     def device(self):
-        return next(self.parameters()).device
+        return next(self.transformer.parameters()).device
 
     @property
     def dtype(self):
-        return next(self.parameters()).dtype
+        return next(self.transformer.parameters()).dtype
 
     @property
     def numel(self):
@@ -188,34 +242,119 @@ class nul(nn.Module):
 
     def chat(
         self,
-        x,
+        prompt,
         size_chat=None,
+        temperature=None,
         top_k=None,
         top_p=None,
-        temperature=None,
-        early_stop=eot(),
-        stat=False,
+        stopper=None,
     ):
         """generate a sequence"""
-        size_chat = size_chat or self.conf.size_chat or self.conf.size_block
-        stopper = early_stop or self.tokenizer.token_to_id(stopper)
-        decoder = f_(
-            infer,
-            temperature or self.conf.temperature,
-            top_k or self.conf.top_k,
-            top_p or self.conf.top_p,
-        )
         processor = f_(
             process,  # text generator
             self,  # model
-            decoder,  # autoregressive decoder
-            self.conf.size_block,  # length of window
-            size_chat,  # length of chat
-            stopper,  # token-id for early-stop
-            stat=stat,  # flag for generating stats
+            size_chat or self.conf.size_chat,  # length of chat
+            temperature or self.conf.temperature,
+            top_k or self.conf.top_k,  # k in top-k filter
+            top_p or self.conf.top_p,  # p in nucleus filter
+            stopper or self.tokenizer.token_to_id(eot()),  # token-id for early-stop
         )
         return cf_(
-            lambda x: dict(x, text=self.from_ids(x.o)) if stat else self.from_ids(x),
+            self.from_ids,
             processor,
             self.to_ids,
-        )(x)
+        )(prompt)
+
+    def get_loss(self, x, target, mask=None, weight=None):
+        logits = self(x)
+        logits = logits.contiguous().view(-1, logits.size(-1))
+        target = target.contiguous().view(-1)
+        loss = F.cross_entropy(
+            logits,
+            target,
+            reduction="mean" if mask is None else "none",
+            weight=weight,
+            ignore_index=self.tokenizer.token_to_id(pad()),
+        )
+        if mask is None:
+            return loss
+        loss *= mask.view(-1)
+        return loss.sum() / mask.sum()
+
+    def update_lr(self, lr=None):
+        """update the current learning rate (optimizer's step size)"""
+        if lr is None:
+            self._lr = sched_lr(
+                self.it,
+                lr=self.conf.lr,
+                lr_min=self.conf.lr_min,
+                steps=self.conf.steps,
+                warmup=self.conf.warmup,
+            )
+        else:
+            self._lr = lr
+        for param_group in self.optim.param_groups:
+            param_group["lr"] = self._lr
+
+    def token_weights(self):
+        weights = torch.ones(self.tokenizer.get_vocab_size(), device=self.device)
+        weights[self.tokenizer.token_to_id(eot())] = 2.0
+        return weights
+
+    def train_by_chat(self, prompt, target, lr=None, steps=None):
+        # TODO: sequence-length
+        t = self.to_ids(eop(prompt) + eot(target))
+        x = t[:, :-1]
+        target = t[:, 1:]
+        mask = context_mask(
+            t[:, 1:],
+            self.tokenizer.token_to_id(pad()),
+            self.tokenizer.token_to_id(eop()),
+            self.tokenizer.token_to_id(eot()),
+            device=self.device,
+        )
+        weight = self.token_weights()
+        self.train()
+        self.update_lr(lr or self.conf.lr)
+        print(f"\033[35mprompt\033[0m {prompt}")
+        print()
+        for i in tracker(range(steps or 1), "repeating"):
+            loss = self.get_loss(x, target, mask=mask, weight=weight)
+            self.optim.zero_grad(set_to_none=True)
+            loss.backward()
+            self.optim.step()
+            print(f"\033[36m{i}\033[0m {self.chat(prompt)}")
+        return self
+
+    def train_by_reading(self, texts=None, lr=None, steps=None):
+        self.train()
+        self.update_lr(lr or self.conf.lr)
+        g = excerpt_text(texts or self.conf.texts, 3 * self.conf.size_block)
+        dl = batch_from_g(
+            g,
+            size_batch=self.conf.size_batch,
+            size_block=self.conf.size_block,
+            encoder=self.to_ids,
+            ipad=self.tokenizer.token_to_id(pad()),
+            device=self.device,
+        )
+        weight = self.token_weights()
+        self.it = 0
+        for _ in tracker(range(steps or self.conf.step), "reading"):
+            x, target = next(dl)
+            loss = self.get_loss(x, target, weight=weight)
+            self.optim.zero_grad(set_to_none=True)
+            loss.backward()
+            self.optim.step()
+            if self.it % 100 == 0:
+                prompt = next(g)
+                print()
+                print(f"\033[35mprompt\033[0m {prompt}")
+                print()
+                print(f"\033[36mresponse\033[0m {self.chat(prompt)}")
+            self.it += 1
+        return self
+
+
+def dataloader():
+    return
