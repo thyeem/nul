@@ -17,12 +17,26 @@ class Decoder(nn.Module):
         )
         self.ln = LayerNorm(config.size_embed, bias=config.bias)
 
-    def forward(self, mask, x):
-        return cf_(
-            self.dropout,
-            cf_(*[f_(layer, mask) for layer in self.layers]),
-            self.ln,
-        )(x)
+    def forward(self, mask, x, past_kv=None, use_cache=False):
+        if not use_cache:
+            return cf_(
+                self.dropout,
+                cf_(*[f_(layer, mask) for layer in self.layers]),
+                self.ln,
+            )(x)
+
+        cache = []
+        x = self.ln(x)
+        for i, layer in enumerate(self.layers):
+            x, o = layer(
+                mask,
+                x,
+                None if past_kv is None else past_kv[i],
+                use_cache=True,
+            )
+            cache.append(o)
+        x = self.dropout(x)
+        return x, cache
 
 
 class Block(nn.Module):
@@ -58,17 +72,17 @@ class Block(nn.Module):
             core,  # core-fn
         )(x)
 
-    def forward(self, mask, x):
+    def forward(self, mask, x, past_kv=None, use_cache=False):
         return cf_(
-            f_(
-                self.sublayer,  # sublayer-2
-                self.mlp,  # feedforward net
-                self.ln_2,  # layer-norm-sublayer-2
+            f_(  # feedforward network sub-layer
+                self.sublayer,
+                self.mlp,
+                self.ln_2,
             ),
-            f_(
-                self.sublayer,  # sublayer-1
-                f_(self.attn, mask),  # self-attention
-                self.ln_1,  # layer-norm-sublayer-1
+            f_(  # causal self attention sub-layer
+                self.sublayer,
+                f_(self.attn, mask, past_kv=past_kv, use_cache=use_cache),
+                self.ln_1,
             ),
         )(x)
 
@@ -135,7 +149,7 @@ class SelfAttention(nn.Module):
         )
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, mask, x):
+    def forward(self, mask, x, past_kv=None, use_cache=False):
         B, S, E = x.size()  # size_batch, sequence length, size_embed
         N, H = self.config.num_heads, E // self.config.num_heads  # E == (N * H)
 
@@ -144,6 +158,11 @@ class SelfAttention(nn.Module):
         k = k.view(B, S, N, H).transpose(1, 2)  # (B,N,S,H)
         v = v.view(B, S, N, H).transpose(1, 2)  # (B,N,S,H)
 
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, k], dim=2)
+            v = torch.cat([past_v, v], dim=2)
+
         # Attention(Q,K,V)
         #   = softmax( Q*K^T / sqrt(d_k) ) * V
         #         // q*k^T: (B,N,S,H) x (B,N,H,S) -> (B,N,S,S)
@@ -151,6 +170,7 @@ class SelfAttention(nn.Module):
         #         // prob @ v: (B,N,S,S) x (B,N,S,H) -> (B,N,S,H)
         #   = attention-weighted value (attention score)
         return cf_(
+            lambda x: (x, (k, v)) if use_cache else id,
             self.dropout,  # dropout of layer's output
             self.c_proj,  # linear projection
             ob(_.view)(B, S, E),  # (B,S,N,H) -> (B,S,E)
