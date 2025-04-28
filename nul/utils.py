@@ -1,5 +1,4 @@
 import math
-import os
 import re
 from collections import Counter
 
@@ -587,6 +586,13 @@ def excerptor(src, length):
         yield f.read(end - start)
 
 
+def context_from_text(text):
+    q = text.rfind(eop())
+    if q == -1:
+        return eop()
+    return text[: q + len(eop())]
+
+
 @torch.no_grad()
 def batch_from_src(src, B, W, encoder, ipad=0, device="cpu"):
     """get a mini-batch (x[B, W], target[B, W]) from a given source"""
@@ -610,3 +616,31 @@ def batch_from_src(src, B, W, encoder, ipad=0, device="cpu"):
                 ]
             ),
         )
+
+
+def ansicolor(code):
+    return lambda x: f"\033[{code}m{x}\033[0m"
+
+
+def red(x):
+    return ansicolor(31)(x)
+
+
+def green(x):
+    return ansicolor(32)(x)
+
+
+def yellow(x):
+    return ansicolor(33)(x)
+
+
+def blue(x):
+    return ansicolor(34)(x)
+
+
+def purple(x):
+    return ansicolor(35)(x)
+
+
+def cyan(x):
+    return ansicolor(36)(x)

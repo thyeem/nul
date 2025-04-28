@@ -1,5 +1,6 @@
+import logging
 import random
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import List, Tuple, get_args, get_origin
 
 import numpy as np
@@ -51,7 +52,7 @@ class nulconf(_autocast):
     size_vocab: int = 20480
     size_embed: int = 256
     size_block: int = 256
-    num_layers: int = 4
+    num_layers: int = 6
     num_heads: int = 8
     ratio_ffn: int = 4
     bias: bool = True
@@ -66,11 +67,12 @@ class nulconf(_autocast):
     top_p: float = 0.9
     temperature: float = 1.0
     lr: float = 3e-4
-    lr_min: float = 1e-5
+    lr_min: float = 1e-4
     optim: str = "adamw"
     weight_decay: float = 0.01
     momentum: float = 0.9
     betas: Tuple[float, float] = (0.9, 0.999)
+    EOT: float = 1.5
     reset: bool = False
 
 
@@ -79,34 +81,61 @@ class nul(nn.Module):
     # setup/info
     # -----------
     @classmethod
-    def new(cls, conf=None, **kwds):
+    def new(cls, name=None, **conf):
         """Create a new model"""
         return (
             nul()
-            .set_conf(conf, **kwds)
+            .set_name(name)
+            .set_conf(nulconf(**conf))
             .set_seed()
             .set_tok()
             .set_model()
             .set_optim()
             .into()
-            .optimize()
+            .finalize()
         )
 
     @classmethod
-    def load(self, model):
+    def load(self, name, **conf):
         """Load the pre-trained"""
-        guard(exists(model, "f"), f"Not found model: {model}")
-        o = torch.load(model, map_location="cpu")
+        path = f"o/{name}"
+        guard(exists(path, "f"), f"Not found model: {name}")
+        o = torch.load(path, map_location="cpu")
         return (
             nul()
-            .set_conf(o["conf"])
+            .set_name(o["name"])
+            .set_conf(nulconf(**(o["conf"] | conf)))
             .set_seed()
             .set_tok(o["tok"])
             .set_model()
             .load_model(o["model"])
-            .set_optim()
-            .optimize()
+            .set_optim(o["optim"])
+            .finalize()
         )
+
+    def save(self, name=None, ckpt=False):
+        name = name or self.name
+        path = f"o/{name}"
+        d = dirname(path)
+        mkdir(d)
+        torch.save(
+            dict(
+                name=name,
+                it=self.it,
+                conf=asdict(self.conf) | dict(reset=False),
+                optim=self.optim.state_dict() if self.optim else None,
+                tok=self.tok.to_str(),
+                model=self.state_dict(),
+            ),
+            normpath(name),
+        )
+        if ckpt:
+            mkdir(f"{path}.snap")
+            shell(f"cp -f {path} {path}.snap/{self.it:06d}")
+
+    def set_name(self, name):
+        self.name = name or base58e(randbytes(5))
+        return self
 
     def set_conf(self, conf=None, **kwds):
         self.conf = nulconf(conf, **kwds)
@@ -184,13 +213,24 @@ class nul(nn.Module):
         dtype = dtype or (
             torch.bfloat16 if torch.cuda.is_available() else torch.float32
         )
+        if hasattr(self.optim, "state"):
+            for state in self.optim.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
         return self.to(device=device, dtype=dtype)
 
     def optimize(self):
-        import torch._dynamo
-
-        torch._dynamo.config.suppress_errors = True
         return torch.compile(self, backend="eager")
+
+    def finalize(self):
+        torch._dynamo.config.suppress_errors = True
+        torch._logging.set_logs(dynamo=logging.ERROR)
+        torch._dynamo.eval_frame.OptimizedModule.__repr__ = self.__repr__
+        return self.into().optimize()
+
+    def __repr__(self):
+        return self.name if hasattr(self, "name") else ""
 
     @property
     def device(self):
@@ -288,6 +328,13 @@ class nul(nn.Module):
             self.to_ids,
         )(prompt)
 
+    def when(self, x):
+        return dict(
+            val=self.it % self.conf.it_val == 0,
+            log=self.it % self.conf.it_shot == 0,
+            ckpt=self.it % self.conf.it_ckpt == 0,
+        ).get(x, False)
+
     def get_loss(self, x, target, mask=None, weight=None):
         logits = self(x)
         logits = logits.contiguous().view(-1, logits.size(-1))
@@ -321,12 +368,12 @@ class nul(nn.Module):
 
     def token_weights(self):
         weights = torch.ones(self.tok.get_vocab_size(), device=self.device)
-        weights[self.tid(eot())] = 3.0
+        weights[self.tid(eot())] = self.conf.EOT
         return weights
 
-    def train_by_chat(self, prompt, target, lr=None, steps=None):
+    def train_by_chat(self, prompt, response, lr=None, steps=None):
         # TODO: sequence-length
-        t = self.to_ids(eop(prompt) + eot(target))
+        t = self.to_ids(eop(prompt) + eot(response))
         x = t[:, :-1]
         target = t[:, 1:]
         mask = context_mask(
@@ -339,27 +386,28 @@ class nul(nn.Module):
         weight = self.token_weights()
         self.train()
         self.update_lr(lr or self.conf.lr)
-        print(f"\033[35mprompt\033[0m {prompt}")
+        print(purple(prompt), prompt)
         print()
         for i in tracker(range(steps or 1), "repeating"):
             loss = self.get_loss(x, target, mask=mask, weight=weight)
             self.optim.zero_grad(set_to_none=True)
             loss.backward()
             self.optim.step()
-            print(f"\033[36m{i}\033[0m {self.chat(prompt)}")
+            print(cyan(i), self.chat(eop(prompt)))
         return self
 
     def train_by_reading(self, src=None, lr=None, steps=None):
-        g = excerpt_text(src or self.conf.src, 3 * self.conf.size_block)
-        dl = batch_from_g(
-            g,
-            size_batch=self.conf.size_batch,
-            size_block=self.conf.size_block,
-            encoder=self.to_ids,
+        dl = batch_from_src(
+            src,
+            self.conf.size_batch,
+            self.conf.size_block,
+            self.to_ids,
             ipad=self.tid(pad()),
             device=self.device,
         )
-        weight = self.token_weights()
+        g = excerptor(src, self.conf.size_block)
+        # weight = self.token_weights()
+        weight = None
         self.it = 0
         self.update_lr(lr or self.conf.lr)
         for _ in tracker(range(steps or self.conf.step), "reading"):
@@ -387,15 +435,18 @@ class nul(nn.Module):
             self.optim.zero_grad(set_to_none=True)
             loss.backward()
             self.optim.step()
-            if self.it % 20 == 0:
-                print()
-                print(f"iter  |  {self.it}")
-                print(f"loss  |  {loss:.4f}")
+            if when("log"):
+                self.log()
             if self.it % 100 == 0:
-                prompt = next(g)
+                prompt = context_from_text(next(g))
                 print()
-                print(f"\033[35mprompt\033[0m {prompt}")
+                print(purple("prompt"), prompt)
                 print()
-                print(f"\033[36mresponse\033[0m {self.chat(prompt)}")
+                print(cyan("response"), self.chat(prompt))
             self.it += 1
         return self
+
+    def log(self):
+        print()
+        print(f"iter  |  {self.it}")
+        print(f"loss  |  {loss:.4f}")

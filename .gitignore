@@ -30,3 +30,6 @@ dist/
 *egg-info
 .venv
 .env/
+
+# proj
+o/
