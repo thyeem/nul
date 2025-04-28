@@ -1,7 +1,7 @@
 import logging
 import random
-from dataclasses import asdict, dataclass, field, fields
-from typing import List, Tuple, get_args, get_origin
+from dataclasses import asdict, dataclass, field
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -15,54 +15,23 @@ from .model import Decoder, LayerNorm
 from .utils import *
 
 
-class _autocast:
-    def __post_init__(self):
-        for f in fields(self):
-            v = getattr(self, f.name)
-            try:
-                if f.type is int:
-                    val = int(v)
-                elif f.type is float:
-                    val = float(v)
-                elif f.type is bool:
-                    if isinstance(v, str):
-                        val = v.lower() in ("true", "1", "yes")
-                    else:
-                        val = bool(v)
-                elif f.type is str:
-                    val = str(v)
-                elif f.type is tuple:
-                    val = tuple(v)
-                elif get_origin(f.type) is list:
-                    elem_type = get_args(f.type)[0]
-                    if isinstance(v, list):
-                        val = [elem_type(item) for item in v]
-                    else:
-                        val = [elem_type(v)]
-                else:
-                    val = v
-                setattr(self, f.name, val)
-            except (ValueError, TypeError):
-                error(f"Cannot convert {v} to {f.type} for field '{f.name}'")
-
-
 @dataclass
-class nulconf(_autocast):
+class nulconf(autocast):
     strict: bool = True
     size_vocab: int = 20480
-    size_embed: int = 256
-    size_block: int = 256
+    size_embed: int = 128
+    size_block: int = 128
     num_layers: int = 6
-    num_heads: int = 8
+    num_heads: int = 4
     ratio_ffn: int = 4
     bias: bool = True
     dropout: float = 0.1
-    tok: str = "t/btok.json"
+    tok: str = "t/byte-tok.json"
     seed: int = 42
     tset: List[str] = field(default_factory=list)
     vset: List[str] = field(default_factory=list)
-    size_batch: int = 16
-    size_chat: int = 256
+    size_batch: int = 8
+    size_chat: int = 128
     top_k: int = 100
     top_p: float = 0.9
     temperature: float = 1.0
@@ -74,6 +43,10 @@ class nulconf(_autocast):
     betas: Tuple[float, float] = (0.9, 0.999)
     EOT: float = 1.5
     reset: bool = False
+    it_log: int = 20
+    it_shot: int = 100
+    it_val: int = -1
+    it_ckpt: int = -1
 
 
 class nul(nn.Module):
@@ -331,25 +304,10 @@ class nul(nn.Module):
     def when(self, x):
         return dict(
             val=self.it % self.conf.it_val == 0,
-            log=self.it % self.conf.it_shot == 0,
+            log=self.it % self.conf.it_log == 0,
+            shot=self.it % self.conf.it_shot == 0,
             ckpt=self.it % self.conf.it_ckpt == 0,
         ).get(x, False)
-
-    def get_loss(self, x, target, mask=None, weight=None):
-        logits = self(x)
-        logits = logits.contiguous().view(-1, logits.size(-1))
-        target = target.contiguous().view(-1)
-        loss = F.cross_entropy(
-            logits,
-            target,
-            reduction="mean" if mask is None else "none",
-            weight=weight,
-            ignore_index=self.tid(pad()),
-        )
-        if mask is None:
-            return loss
-        loss *= mask.view(-1)
-        return loss.sum() / mask.sum()
 
     def update_lr(self, lr=None):
         """update the current learning rate (optimizer's step size)"""
@@ -371,7 +329,23 @@ class nul(nn.Module):
         weights[self.tid(eot())] = self.conf.EOT
         return weights
 
-    def train_by_chat(self, prompt, response, lr=None, steps=None):
+    def get_loss(self, x, target, mask=None, weight=None):
+        logits = self(x)
+        logits = logits.contiguous().view(-1, logits.size(-1))
+        target = target.contiguous().view(-1)
+        loss = F.cross_entropy(
+            logits,
+            target,
+            reduction="mean" if mask is None else "none",
+            weight=weight,
+            ignore_index=self.tid(pad()),
+        )
+        if mask is None:
+            return loss
+        loss *= mask.view(-1)
+        return loss.sum() / mask.sum()
+
+    def human_feedback(self, prompt, response, lr=None, steps=None):
         # TODO: sequence-length
         t = self.to_ids(eop(prompt) + eot(response))
         x = t[:, :-1]
@@ -383,20 +357,19 @@ class nul(nn.Module):
             self.tid(eot()),
             device=self.device,
         )
-        weight = self.token_weights()
         self.train()
         self.update_lr(lr or self.conf.lr)
         print(purple(prompt), prompt)
         print()
         for i in tracker(range(steps or 1), "repeating"):
-            loss = self.get_loss(x, target, mask=mask, weight=weight)
+            loss = self.get_loss(x, target, mask=mask)
             self.optim.zero_grad(set_to_none=True)
             loss.backward()
             self.optim.step()
             print(cyan(i), self.chat(eop(prompt)))
         return self
 
-    def train_by_reading(self, src=None, lr=None, steps=None):
+    def self_supervised(self, src=None, lr=None, steps=None):
         dl = batch_from_src(
             src,
             self.conf.size_batch,
@@ -406,8 +379,6 @@ class nul(nn.Module):
             device=self.device,
         )
         g = excerptor(src, self.conf.size_block)
-        # weight = self.token_weights()
-        weight = None
         self.it = 0
         self.update_lr(lr or self.conf.lr)
         for _ in tracker(range(steps or self.conf.step), "reading"):
@@ -420,33 +391,24 @@ class nul(nn.Module):
                 self.tid(eot()),
                 device=self.device,
             )
-
-            logits = self(x)
-            loss = F.cross_entropy(
-                logits.contiguous().view(-1, logits.size(-1)),
-                target.contiguous().view(-1),
-                reduction="none",
-                weight=weight,
-                ignore_index=self.tid(pad()),
-            )
-            loss *= mask.view(-1)
-            loss = loss.sum() / mask.sum()
-
             self.optim.zero_grad(set_to_none=True)
+            loss = self.get_loss(x, target, mask=mask)
             loss.backward()
             self.optim.step()
-            if when("log"):
-                self.log()
-            if self.it % 100 == 0:
-                prompt = context_from_text(next(g))
-                print()
-                print(purple("prompt"), prompt)
-                print()
-                print(cyan("response"), self.chat(prompt))
+            if self.when("log"):
+                self.log(loss)
+            if self.when("shot"):
+                self.shot(context_from_text(next(g)))
             self.it += 1
         return self
 
-    def log(self):
+    def log(self, loss):
         print()
         print(f"iter  |  {self.it}")
         print(f"loss  |  {loss:.4f}")
+
+    def shot(self, prompt):
+        print()
+        print(purple("prompt"), prompt)
+        print()
+        print(cyan("response"), self.chat(prompt))
