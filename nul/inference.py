@@ -21,11 +21,11 @@ def process(model, size_seq, temperature, k, p, stopper, x):
 
 
 @torch.no_grad()
-def infer(logits, t, k, p):
+def infer(logits, temperature, k, p):
     """decode by sampling: pick the next token from a probability dist"""
-    if t == 0:
+    if temperature == 0:
         return logits.argmax(dim=-1, keepdim=True)
-    logits /= t
+    logits /= temperature
     logits = logits - logits.max(dim=-1, keepdim=True).values
     probs = F.softmax(
         cf_(  # 0 means that the filter is off

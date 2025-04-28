@@ -20,7 +20,7 @@ class Decoder(nn.Module):
     def forward(self, mask, x):
         return cf_(
             self.dropout,
-            cf_(*[f_(layer, mask) for layer in rev(self.layers)]),
+            cf_(*[f_(layer, mask) for layer in self.layers]),
             self.ln,
         )(x)
 
@@ -53,9 +53,9 @@ class Block(nn.Module):
     @staticmethod
     def sublayer(core, layer_norm, x):
         return cf_(
+            layer_norm,  # layer-norm
             _ + x,  # residual connection
             core,  # core-fn
-            layer_norm,  # layer-norm
         )(x)
 
     def forward(self, mask, x):

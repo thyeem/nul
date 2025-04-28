@@ -317,7 +317,7 @@ def read_tok(from_json=None, from_str=None):
         error("Error, no given tokenizer to load")
 
 
-def stream(src, from_str=False, jamo=False, size=2 << 10, **ref):
+def stream(src, from_str=False, jamo=False, size=2 << 12, **ref):
     chunks = flat(
         chunks_str(size, from_str)
         if from_str
@@ -333,8 +333,8 @@ def train_tok(
     from_str=False,
     byte_level=True,
     size_vocab=5000,
-    size_chunk=2 << 10,
-    min_frequency=2,
+    size_chunk=2 << 12,
+    min_frequency=5,
     dropout=None,
     to_file=None,
     **ref,  # e.g., custom=rf"\s?<\|unk\|>|<\|pad\|>\s?"
@@ -346,7 +346,7 @@ def train_tok(
         from_str=from_str,
         jamo=not byte_level,
         size=size_chunk,
-        **ref,
+        **ref,  # kwargs for refiner or text-normalizer
     )
 
     def bytetok():
@@ -387,7 +387,8 @@ def train_tok(
 
 def is_byte_tok(t):
     """Check if a given tokenizer is a byte-level BPE tokenizer."""
-    return "Ġ" in t.get_vocab()
+    vocab = t.get_vocab()
+    return any(marker in vocab for marker in ["Ġ", "Ċ"])
 
 
 def to_tokens(t):
@@ -462,14 +463,14 @@ def context_mask(x, ipad, ieop, ieot, device="cpu"):
         p = (x[i] == ieop).nonzero(as_tuple=True)[0]
         s = (x[i] == ieot).nonzero(as_tuple=True)[0]
         P = p[-1] if len(p) > 0 else -1  # where the last <eop> is found
-        S = s[-1] if len(s) > 0 else -1  # where the last <eot> is found
-
-        if P >= 0 and S > P:
-            mask[i, P + 1 : S + 1] = 1  # <eop>...<eot>
-        elif P >= 0:
-            mask[i, P + 1 :] = 1  # <eop>...]
-        elif S >= 0:
-            mask[i, : S + 1] = 1  # [...<eot>
+        if P >= 0:
+            for start in p:
+                end_candidates = s[s > start]
+                if len(end_candidates) > 0:
+                    end = end_candidates[0]
+                    mask[i, start + 1 : end + 1] = 1
+                else:
+                    mask[i, start + 1 :] = 1
         else:
             mask[i, :] = 1  # open the entire tokens
         mask[i, x[i] == ipad] = 0  # masking pad tokens
@@ -559,19 +560,35 @@ def tloader(x, batch_size=1, shuffle=True, **kwargs):
     return DataLoader(t, batch_size=batch_size, shuffle=shuffle, **kwargs)
 
 
-def excerpt_text(src, length):
-    fs = [reader(f, mode="rb") for f in flat(src)]
-    sizes = [os.path.getsize(f) for f in flat(src)]
+def excerptor(src, length):
+    fs = [open(f, mode="r", encoding="utf-8", errors="ignore") for f in flat(src)]
+    sizes = [f.seek(0, 2) or f.tell() for f in fs]
     while True:
         i = randint(len(fs))
         f = fs[i]
-        start = randint(sizes[i] - length - 1)
+        size = sizes[i]
+        start = randint(0, size - length - 1)
         f.seek(start)
-        yield f.read(length).decode("utf-8", errors="ignore")
+        while start > 0:
+            f.seek(start)
+            if f.read(1).isspace():
+                break
+            start -= 1
+        end = start + length
+        if end >= size:
+            end = size - 1
+        f.seek(end)
+        while end < size:
+            f.seek(end)
+            if f.read(1).isspace():
+                break
+            end += 1
+        f.seek(start)
+        yield f.read(end - start)
 
 
 @torch.no_grad()
-def batch_from_g(g, size_batch, size_block, encoder, ipad=0, device="cpu"):
+def batch_from_src(src, B, W, encoder, ipad=0, device="cpu"):
     """get a mini-batch (x[B, W], target[B, W]) from a given source"""
 
     def pad_(t, size, ipad=ipad):
@@ -579,8 +596,7 @@ def batch_from_g(g, size_batch, size_block, encoder, ipad=0, device="cpu"):
             return F.pad(t, (0, size - t.size(-1)), value=ipad)
         return t
 
-    B = size_batch
-    W = size_block
+    g = excerptor(src, W * 4)
     while True:
         yield mapl(
             torch.stack,

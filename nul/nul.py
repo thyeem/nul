@@ -1,55 +1,77 @@
 import random
+from dataclasses import dataclass, field, fields
+from typing import List, Tuple, get_args, get_origin
 
 import numpy as np
 import torch
 import torch._dynamo
 from foc import *
 from ouch import *
-from rich.console import Console
 from torch import nn
 
 from .inference import *
 from .model import Decoder, LayerNorm
 from .utils import *
 
-con = Console(width=100)
+
+class _autocast:
+    def __post_init__(self):
+        for f in fields(self):
+            v = getattr(self, f.name)
+            try:
+                if f.type is int:
+                    val = int(v)
+                elif f.type is float:
+                    val = float(v)
+                elif f.type is bool:
+                    if isinstance(v, str):
+                        val = v.lower() in ("true", "1", "yes")
+                    else:
+                        val = bool(v)
+                elif f.type is str:
+                    val = str(v)
+                elif f.type is tuple:
+                    val = tuple(v)
+                elif get_origin(f.type) is list:
+                    elem_type = get_args(f.type)[0]
+                    if isinstance(v, list):
+                        val = [elem_type(item) for item in v]
+                    else:
+                        val = [elem_type(v)]
+                else:
+                    val = v
+                setattr(self, f.name, val)
+            except (ValueError, TypeError):
+                error(f"Cannot convert {v} to {f.type} for field '{f.name}'")
 
 
-def nulconf(conf=None, **kwds):
-    o = dmap(
-        strict=True,
-        size_vocab=4096,
-        size_embed=128,
-        size_block=128,
-        num_layers=8,
-        num_heads=8,
-        ratio_ffn=2,
-        bias=True,
-        dropout=0.1,
-        seed=42,
-        texts=[],
-        size_batch=8,
-        size_chat=64,
-        top_k=100,
-        top_p=0.9,
-        temperature=0.7,
-        lr=1e-3,
-        lr_min=1e-4,
-        optim="sgd",
-        weight_decay=1e-4,
-        momentum=0.9,
-        betas=(0.9, 0.999),
-        tokenizer="t/cbpe.json",
-    )
-
-    def quar(x):
-        x = x or {}
-        for k in x:
-            if k not in o:
-                error(f"found invalid key: {k}")
-        return dmap(x)
-
-    return o | quar(conf) | quar(dict(**kwds))
+@dataclass
+class nulconf(_autocast):
+    strict: bool = True
+    size_vocab: int = 20480
+    size_embed: int = 256
+    size_block: int = 256
+    num_layers: int = 4
+    num_heads: int = 8
+    ratio_ffn: int = 4
+    bias: bool = True
+    dropout: float = 0.1
+    tok: str = "t/btok.json"
+    seed: int = 42
+    tset: List[str] = field(default_factory=list)
+    vset: List[str] = field(default_factory=list)
+    size_batch: int = 16
+    size_chat: int = 256
+    top_k: int = 100
+    top_p: float = 0.9
+    temperature: float = 1.0
+    lr: float = 3e-4
+    lr_min: float = 1e-5
+    optim: str = "adamw"
+    weight_decay: float = 0.01
+    momentum: float = 0.9
+    betas: Tuple[float, float] = (0.9, 0.999)
+    reset: bool = False
 
 
 class nul(nn.Module):
@@ -63,7 +85,7 @@ class nul(nn.Module):
             nul()
             .set_conf(conf, **kwds)
             .set_seed()
-            .set_tokenizer()
+            .set_tok()
             .set_model()
             .set_optim()
             .into()
@@ -79,7 +101,7 @@ class nul(nn.Module):
             nul()
             .set_conf(o["conf"])
             .set_seed()
-            .set_tokenizer(o["tokenizer"])
+            .set_tok(o["tok"])
             .set_model()
             .load_model(o["model"])
             .set_optim()
@@ -99,11 +121,12 @@ class nul(nn.Module):
         torch.backends.cudnn.benchmark = False
         return self
 
-    def set_tokenizer(self, from_str=None):
+    def set_tok(self, from_str=None):
         if from_str is None:
-            self.tokenizer = read_tok(from_json=self.conf.tokenizer)
+            self.tok = read_tok(from_json=self.conf.tok)
         else:
-            self.tokenizer = read_tok(from_str=from_str)
+            self.tok = read_tok(from_str=from_str)
+        self.tid = self.tok.token_to_id
         return self
 
     def set_model(self):
@@ -196,7 +219,7 @@ class nul(nn.Module):
     def to_ids(self, x):
         """from string to tensor"""
         return torch.as_tensor(
-            to_ids(self.tokenizer)(x),
+            to_ids(self.tok)(x),
             device=self.device,
         ).unsqueeze(0)
 
@@ -204,7 +227,7 @@ class nul(nn.Module):
         """from tensor to string"""
         return cf_(
             unwords,
-            map(cf_(from_ids(self.tokenizer), ob(_.tolist)())),
+            map(cf_(from_ids(self.tok), ob(_.tolist)())),
         )(torch.unbind(x, dim=0))
 
     def forward(self, x, embedding=False):
@@ -213,7 +236,7 @@ class nul(nn.Module):
         """
         x = cutoff(x, self.conf.size_block)
         B, S = x.size()  # batch size, sequence length
-        mask = attention_mask(x, self.tokenizer.token_to_id(pad()))
+        mask = attention_mask(x, self.tid(pad()))
         return cf_(
             id if embedding else self.lm_head,  # (B,S,E) -> (B,S,V)
             self.transformer.ln,
@@ -257,7 +280,7 @@ class nul(nn.Module):
             temperature or self.conf.temperature,
             top_k or self.conf.top_k,  # k in top-k filter
             top_p or self.conf.top_p,  # p in nucleus filter
-            stopper or self.tokenizer.token_to_id(eot()),  # token-id for early-stop
+            stopper or self.tid(eot()),  # token-id for early-stop
         )
         return cf_(
             self.from_ids,
@@ -274,7 +297,7 @@ class nul(nn.Module):
             target,
             reduction="mean" if mask is None else "none",
             weight=weight,
-            ignore_index=self.tokenizer.token_to_id(pad()),
+            ignore_index=self.tid(pad()),
         )
         if mask is None:
             return loss
@@ -297,8 +320,8 @@ class nul(nn.Module):
             param_group["lr"] = self._lr
 
     def token_weights(self):
-        weights = torch.ones(self.tokenizer.get_vocab_size(), device=self.device)
-        weights[self.tokenizer.token_to_id(eot())] = 2.0
+        weights = torch.ones(self.tok.get_vocab_size(), device=self.device)
+        weights[self.tid(eot())] = 3.0
         return weights
 
     def train_by_chat(self, prompt, target, lr=None, steps=None):
@@ -307,10 +330,10 @@ class nul(nn.Module):
         x = t[:, :-1]
         target = t[:, 1:]
         mask = context_mask(
-            t[:, 1:],
-            self.tokenizer.token_to_id(pad()),
-            self.tokenizer.token_to_id(eop()),
-            self.tokenizer.token_to_id(eot()),
+            target,
+            self.tid(pad()),
+            self.tid(eop()),
+            self.tid(eot()),
             device=self.device,
         )
         weight = self.token_weights()
@@ -326,26 +349,48 @@ class nul(nn.Module):
             print(f"\033[36m{i}\033[0m {self.chat(prompt)}")
         return self
 
-    def train_by_reading(self, texts=None, lr=None, steps=None):
-        self.train()
-        self.update_lr(lr or self.conf.lr)
-        g = excerpt_text(texts or self.conf.texts, 3 * self.conf.size_block)
+    def train_by_reading(self, src=None, lr=None, steps=None):
+        g = excerpt_text(src or self.conf.src, 3 * self.conf.size_block)
         dl = batch_from_g(
             g,
             size_batch=self.conf.size_batch,
             size_block=self.conf.size_block,
             encoder=self.to_ids,
-            ipad=self.tokenizer.token_to_id(pad()),
+            ipad=self.tid(pad()),
             device=self.device,
         )
         weight = self.token_weights()
         self.it = 0
+        self.update_lr(lr or self.conf.lr)
         for _ in tracker(range(steps or self.conf.step), "reading"):
+            self.train()
             x, target = next(dl)
-            loss = self.get_loss(x, target, weight=weight)
+            mask = context_mask(
+                target,
+                self.tid(pad()),
+                self.tid(eop()),
+                self.tid(eot()),
+                device=self.device,
+            )
+
+            logits = self(x)
+            loss = F.cross_entropy(
+                logits.contiguous().view(-1, logits.size(-1)),
+                target.contiguous().view(-1),
+                reduction="none",
+                weight=weight,
+                ignore_index=self.tid(pad()),
+            )
+            loss *= mask.view(-1)
+            loss = loss.sum() / mask.sum()
+
             self.optim.zero_grad(set_to_none=True)
             loss.backward()
             self.optim.step()
+            if self.it % 20 == 0:
+                print()
+                print(f"iter  |  {self.it}")
+                print(f"loss  |  {loss:.4f}")
             if self.it % 100 == 0:
                 prompt = next(g)
                 print()
@@ -354,7 +399,3 @@ class nul(nn.Module):
                 print(f"\033[36mresponse\033[0m {self.chat(prompt)}")
             self.it += 1
         return self
-
-
-def dataloader():
-    return
