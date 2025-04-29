@@ -441,14 +441,16 @@ def dumper(x, **kwargs):
 
 
 @torch.no_grad()
-def attention_mask(x, ipad=0):
+def attention_mask(x, size_kv=0, ipad=0):
     """generate a padding-considered causual mask that controls which tokens
     the model should not pay attention to. (B, S) -> (B, 1, S, S)
     """
-    mask = torch.tril(  # causal mask
-        torch.ones(1, 1, x.size(-1), x.size(-1), dtype=torch.bool, device=x.device)
+    L = x.size(-1) + size_kv
+    causal_mask = torch.tril(
+        torch.ones(1, 1, x.size(-1), L, dtype=torch.bool, device=x.device)
     )
-    return mask * (x != ipad).unsqueeze(1).unsqueeze(1).repeat(1, 1, x.size(-1), 1)
+    padding_mask = (x != ipad).unsqueeze(1).unsqueeze(1).repeat(1, 1, x.size(-1), 1)
+    return causal_mask & padding_mask
 
 
 @torch.no_grad()

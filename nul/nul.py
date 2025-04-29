@@ -11,7 +11,7 @@ from ouch import *
 from torch import nn
 
 from .inference import *
-from .model import Decoder, LayerNorm
+from .model import Transformer
 from .utils import *
 
 
@@ -54,12 +54,12 @@ class nul(nn.Module):
     # setup/info
     # -----------
     @classmethod
-    def new(cls, name=None, **conf):
+    def new(cls, name=None, **kwargs):
         """Create a new model"""
         return (
             nul()
             .set_name(name)
-            .set_conf(nulconf(**conf))
+            .set_conf(**kwargs)
             .set_seed()
             .set_tok()
             .set_model()
@@ -69,7 +69,7 @@ class nul(nn.Module):
         )
 
     @classmethod
-    def load(self, name, **conf):
+    def load(self, name, **kwargs):
         """Load the pre-trained"""
         path = f"o/{name}"
         guard(exists(path, "f"), f"Not found model: {name}")
@@ -77,7 +77,7 @@ class nul(nn.Module):
         return (
             nul()
             .set_name(o["name"])
-            .set_conf(nulconf(**(o["conf"] | conf)))
+            .set_conf(conf=o["conf"], **kwargs)
             .set_seed()
             .set_tok(o["tok"])
             .set_model()
@@ -110,8 +110,9 @@ class nul(nn.Module):
         self.name = name or base58e(randbytes(5))
         return self
 
-    def set_conf(self, conf=None, **kwds):
-        self.conf = nulconf(conf, **kwds)
+    def set_conf(self, conf=None, **kwargs):
+        conf = conf or {}
+        self.conf = nulconf(**(conf | kwargs))
         return self
 
     def set_seed(self, seed=None):
@@ -132,14 +133,7 @@ class nul(nn.Module):
         return self
 
     def set_model(self):
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Embedding(self.conf.size_vocab, self.conf.size_embed),
-                wpe=nn.Embedding(self.conf.size_block, self.conf.size_embed),
-                decoder=Decoder(self.conf),
-                ln=LayerNorm(self.conf.size_embed, bias=self.conf.bias),
-            )
-        )
+        self.transformer = Transformer(self.conf)
         self.lm_head = nn.Linear(self.conf.size_embed, self.conf.size_vocab, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
         return self
@@ -243,28 +237,18 @@ class nul(nn.Module):
             map(cf_(from_ids(self.tok), ob(_.tolist)())),
         )(torch.unbind(x, dim=0))
 
-    def forward(self, x, embedding=False):
-        """forward
-        input(B,S) -> logits(B,S,V)
-        """
+    def forward(self, x, past_kv=None, use_cache=False):
+        # TODO: keep context without cut-off
         x = cutoff(x, self.conf.size_block)
-        B, S = x.size()  # batch size, sequence length
-        mask = attention_mask(x, self.tid(pad()))
-        return cf_(
-            id if embedding else self.lm_head,  # (B,S,E) -> (B,S,V)
-            self.transformer.ln,
-            f_(self.transformer.decoder, mask),  # (B,S,E)
-            _ + self.pos(S),  # W_p[:,t]: (B,S,E) + (1,S,E)
-            self.transformer.wte,  # W_e[:,x(t)]: (B,S) -> (B,S,E)
+        return cf_(  # lm-head: (B, S, E) -> (B, S, V) logits
+            bimap(self.lm_head, id) if use_cache else self.lm_head,
+            f_(
+                self.transformer,
+                past_kv=past_kv,
+                use_cache=use_cache,
+                ipad=self.tid(pad()),
+            ),  # Transformer: (B, S) -> (B, S, E)
         )(x)
-
-    def pos(self, S):
-        """Incremental positional vector"""
-        return self.transformer.wpe(  # W_p[:,t] -> (1,S,E)
-            torch.arange(  # [[0,1,..,S]] -> (1,S)
-                0, S, dtype=torch.long, device=self.device
-            ).unsqueeze(0)
-        )
 
     @torch.no_grad()
     def embed(self, x, mean=True, norm=True):
