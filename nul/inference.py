@@ -9,9 +9,15 @@ from .utils import *
 def process(model, size_seq, temperature, k, p, stopper, x):
     """Autoregressive generation process"""
     model.eval()
+    past_kv = None
     count = 0
     for _ in range(size_seq):
-        logits = model(x)[:, -1, :]
+        logits, past_kv = model(
+            x if past_kv is None else x[:, -1:],
+            past_kv=past_kv,
+            use_cache=True,
+        )
+        logits = logits[:, -1, :]
         y = infer(logits, temperature, k, p)
         x = torch.cat((x, y), dim=1)
         count += 1

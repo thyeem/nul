@@ -54,12 +54,12 @@ class nul(nn.Module):
     # setup/info
     # -----------
     @classmethod
-    def new(cls, name=None, **kwargs):
+    def new(cls, name=None, conf=None, **kwargs):
         """Create a new model"""
         return (
             nul()
             .set_name(name)
-            .set_conf(**kwargs)
+            .set_conf(conf=conf, **kwargs)
             .set_seed()
             .set_tok()
             .set_model()
@@ -111,7 +111,7 @@ class nul(nn.Module):
         return self
 
     def set_conf(self, conf=None, **kwargs):
-        conf = conf or {}
+        conf = asdict(conf) if conf else {}
         self.conf = nulconf(**(conf | kwargs))
         return self
 

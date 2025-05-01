@@ -431,8 +431,6 @@ def vocab_freq(t, d):
 # ----------
 # nul-utils
 # ----------
-
-
 @fx
 def dumper(x, **kwargs):
     print()
@@ -442,14 +440,16 @@ def dumper(x, **kwargs):
 
 @torch.no_grad()
 def attention_mask(x, size_kv=0, ipad=0):
-    """generate a padding-considered causual mask that controls which tokens
-    the model should not pay attention to. (B, S) -> (B, 1, S, S)
-    """
-    L = x.size(-1) + size_kv
-    causal_mask = torch.tril(
-        torch.ones(1, 1, x.size(-1), L, dtype=torch.bool, device=x.device)
+    """generate a padding-considered causal mask: (B, S) -> (B, 1, S, L)"""
+    B, S = x.size()
+    L = S + size_kv  # total length including KV-cache
+    causal_mask = torch.ones(1, 1, S, L, dtype=torch.bool, device=x.device)
+    if size_kv > 0:
+        causal_mask[..., :size_kv] = True
+    causal_mask[..., size_kv:] = torch.tril(
+        torch.ones((S, S), dtype=torch.bool, device=x.device)
     )
-    padding_mask = (x != ipad).unsqueeze(1).unsqueeze(1).repeat(1, 1, x.size(-1), 1)
+    padding_mask = (x != ipad).unsqueeze(1).unsqueeze(-1)  # (B, 1, S, 1)
     return causal_mask & padding_mask
 
 
