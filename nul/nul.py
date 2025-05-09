@@ -19,10 +19,10 @@ from .utils import *
 class nulconf(autocast):
     strict: bool = True
     size_vocab: int = 20480
-    size_embed: int = 128
+    size_embed: int = 256
     size_block: int = 128
     num_layers: int = 6
-    num_heads: int = 4
+    num_heads: int = 8
     ratio_ffn: int = 4
     bias: bool = True
     dropout: float = 0.1
@@ -38,7 +38,7 @@ class nulconf(autocast):
     lr: float = 3e-4
     lr_min: float = 1e-4
     optim: str = "adamw"
-    weight_decay: float = 0.01
+    weight_decay: float = 0.005
     momentum: float = 0.9
     betas: Tuple[float, float] = (0.9, 0.999)
     EOT: float = 1.5
@@ -368,13 +368,14 @@ class nul(nn.Module):
         for _ in tracker(range(steps or self.conf.step), "reading"):
             self.train()
             x, target = next(dl)
-            mask = context_mask(
-                target,
-                self.tid(pad()),
-                self.tid(eop()),
-                self.tid(eot()),
-                device=self.device,
-            )
+            # mask = context_mask(
+            # target,
+            # self.tid(pad()),
+            # self.tid(eop()),
+            # self.tid(eot()),
+            # device=self.device,
+            # )
+            mask = None
             self.optim.zero_grad(set_to_none=True)
             loss = self.get_loss(x, target, mask=mask)
             loss.backward()
@@ -382,7 +383,7 @@ class nul(nn.Module):
             if self.when("log"):
                 self.log(loss)
             if self.when("shot"):
-                self.shot(context_from_text(next(g)))
+                self.shot(context_from_text(next(g), pre=True))
             self.it += 1
         return self
 

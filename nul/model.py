@@ -180,6 +180,8 @@ class SelfAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, mask, x, past_kv=None, use_cache=False):
+        if isinstance(x, tuple):
+            x = fst(x)
         B, S, E = x.size()  # size_batch, sequence length, size_embed
         N, H = self.config.num_heads, E // self.config.num_heads  # E == (N * H)
 

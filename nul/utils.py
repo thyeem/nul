@@ -588,7 +588,9 @@ def excerptor(src, length):
         yield f.read(end - start)
 
 
-def context_from_text(text):
+def context_from_text(text, pre=False):
+    if pre:
+        return text
     q = text.rfind(eop())
     if q == -1:
         return eop()
