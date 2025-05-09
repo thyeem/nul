@@ -438,15 +438,25 @@ def dumper(x, **kwargs):
     print()
 
 
+def len_cached_seq(cached):
+    """get the squence length, S' of KV-cache. Suppose that
+
+    cached = List of KV-cache tuple each layer
+           = [(k_1, v_1), ..., (k_N, v_N)]
+           = [( k=(B, N, S', H), v=(B, N, S', H) ), ...]
+    """
+    return 0 if cached is None else cached[0][0].size(2)
+
+
 @torch.no_grad()
-def attention_mask(x, size_kv=0, ipad=0):
+def attention_mask(x, C=0, ipad=0):
     """generate a padding-considered causal mask: (B, S) -> (B, 1, S, L)"""
     B, S = x.size()
-    L = S + size_kv  # total length including KV-cache
+    L = S + C  # total length including KV-cache squence length (C)
     causal_mask = torch.ones(1, 1, S, L, dtype=torch.bool, device=x.device)
-    if size_kv > 0:
-        causal_mask[..., :size_kv] = True
-    causal_mask[..., size_kv:] = torch.tril(
+    if C > 0:
+        causal_mask[..., :C] = True
+    causal_mask[..., C:] = torch.tril(
         torch.ones((S, S), dtype=torch.bool, device=x.device)
     )
     padding_mask = (x != ipad).unsqueeze(1).unsqueeze(-1)  # (B, 1, S, 1)
@@ -525,7 +535,7 @@ def normalize(x, dim=1, eps=1e-7):
 
 
 @fx
-def sched_lr(it, lr=1e-3, lr_min=1e-5, steps=10000, warmup=1000):
+def sched_lr(it, lr=1e-3, lr_min=1e-5, steps=10000, warmup=100):
     """Learning rate scheduler (cosine-annealing with warmup)"""
     it %= steps
     if it < warmup:

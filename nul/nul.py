@@ -35,18 +35,22 @@ class nulconf(autocast):
     top_k: int = 100
     top_p: float = 0.9
     temperature: float = 1.0
-    lr: float = 3e-4
-    lr_min: float = 1e-4
+    lr: float = 5e-4
+    lr_min: float = 5e-5
+    warmup: int = 100
     optim: str = "adamw"
-    weight_decay: float = 0.005
+    weight_decay: float = 0.01
     momentum: float = 0.9
     betas: Tuple[float, float] = (0.9, 0.999)
     EOT: float = 1.5
     reset: bool = False
-    it_log: int = 20
-    it_shot: int = 100
-    it_val: int = -1
-    it_ckpt: int = -1
+    epoch: int = 1
+    steps: int = 50000
+    intv_lr: int = 20
+    intv_log: int = 20
+    intv_shot: int = 100
+    intv_val: int = -1
+    intv_ckpt: int = -1
 
 
 class nul(nn.Module):
@@ -237,15 +241,14 @@ class nul(nn.Module):
             map(cf_(from_ids(self.tok), ob(_.tolist)())),
         )(torch.unbind(x, dim=0))
 
-    def forward(self, x, past_kv=None, use_cache=False):
+    def forward(self, x, cached=None):
         # TODO: keep context without cut-off
         x = cutoff(x, self.conf.size_block)
         return cf_(  # lm-head: (B, S, E) -> (B, S, V) logits
-            bimap(self.lm_head, id) if use_cache else self.lm_head,
+            self.lm_head if cached is None else bimap(self.lm_head, id),
             f_(
                 self.transformer,
-                past_kv=past_kv,
-                use_cache=use_cache,
+                cached=cached,
                 ipad=self.tid(pad()),
             ),  # Transformer: (B, S) -> (B, S, E)
         )(x)
@@ -287,24 +290,30 @@ class nul(nn.Module):
 
     def when(self, x):
         return dict(
-            val=self.it % self.conf.it_val == 0,
-            log=self.it % self.conf.it_log == 0,
-            shot=self.it % self.conf.it_shot == 0,
-            ckpt=self.it % self.conf.it_ckpt == 0,
+            lr=self.it % self.conf.intv_lr == 0,
+            val=self.it % self.conf.intv_val == 0,
+            log=self.it % self.conf.intv_log == 0,
+            shot=self.it % self.conf.intv_shot == 0,
+            ckpt=self.it % self.conf.intv_ckpt == 0,
         ).get(x, False)
 
-    def update_lr(self, lr=None):
+    def update_lr(self, lr=None, lr_min=None, steps=None, warmup=None):
         """update the current learning rate (optimizer's step size)"""
-        if lr is None:
-            self._lr = sched_lr(
+        lr = lr or self.conf.lr
+        lr_min = lr_min or self.conf.lr_min
+        steps = steps or self.conf.steps
+        warmup = warmup or self.conf.warmup
+        self._lr = (
+            lr
+            if lr_min == -1
+            else sched_lr(
                 self.it,
-                lr=self.conf.lr,
-                lr_min=self.conf.lr_min,
-                steps=self.conf.steps,
-                warmup=self.conf.warmup,
+                lr=lr,
+                lr_min=lr_min,
+                steps=steps,
+                warmup=warmup,
             )
-        else:
-            self._lr = lr
+        )
         for param_group in self.optim.param_groups:
             param_group["lr"] = self._lr
 
@@ -346,14 +355,15 @@ class nul(nn.Module):
         print(purple(prompt), prompt)
         print()
         for i in tracker(range(steps or 1), "repeating"):
-            loss = self.get_loss(x, target, mask=mask)
             self.optim.zero_grad(set_to_none=True)
+            loss = self.get_loss(x, target, mask=mask)
             loss.backward()
             self.optim.step()
             print(cyan(i), self.chat(eop(prompt)))
         return self
 
-    def self_supervised(self, src=None, lr=None, steps=None):
+    def self_supervised(self, src=None):
+        src = src or self.conf.src
         dl = batch_from_src(
             src,
             self.conf.size_batch,
@@ -364,9 +374,10 @@ class nul(nn.Module):
         )
         g = excerptor(src, self.conf.size_block)
         self.it = 0
-        self.update_lr(lr or self.conf.lr)
-        for _ in tracker(range(steps or self.conf.step), "reading"):
+        for _ in tracker(range(self.conf.steps), "reading"):
             self.train()
+            if self.when("lr"):
+                self.update_lr()
             x, target = next(dl)
             # mask = context_mask(
             # target,
@@ -376,8 +387,8 @@ class nul(nn.Module):
             # device=self.device,
             # )
             mask = None
-            self.optim.zero_grad(set_to_none=True)
             loss = self.get_loss(x, target, mask=mask)
+            self.optim.zero_grad(set_to_none=True)
             loss.backward()
             self.optim.step()
             if self.when("log"):
@@ -390,6 +401,7 @@ class nul(nn.Module):
     def log(self, loss):
         print()
         print(f"iter  |  {self.it}")
+        print(f"  lr  |  {self._lr:.8f}")
         print(f"loss  |  {loss:.4f}")
 
     def shot(self, prompt):

@@ -5,7 +5,7 @@ from foc import *
 from torch import nn
 from torch.nn import functional as F
 
-from .utils import attention_mask
+from .utils import attention_mask, len_cached_seq
 
 
 class Transformer(nn.Module):
@@ -17,21 +17,18 @@ class Transformer(nn.Module):
         self.decoder = Decoder(config)
         self.ln = LayerNorm(config.size_embed, bias=config.bias)
 
-    def forward(self, x, past_kv=None, use_cache=False, ipad=0):
+    def forward(self, x, cached=None, ipad=0):
         B, S = x.size()
-        # past_kv = [(k=(B, N, S', H), v=(B, N, S', H)), ...]
-        size_kv = 0 if past_kv is None else past_kv[0][0].size(2)  # S'
-        mask = attention_mask(x, size_kv=size_kv, ipad=ipad)
+        C = len_cached_seq(cached)
+        mask = attention_mask(x, C=C, ipad=ipad)  # (B, 1, S, L)
         pos = (
-            self.wpe(
-                torch.arange(size_kv, size_kv + S, dtype=torch.long, device=x.device)
-            )
+            self.wpe(torch.arange(C, C + S, dtype=torch.long, device=x.device))
             .unsqueeze(0)  # (1, S, E)
             .expand(B, S, -1)  # (B, S, E)
         )
         return cf_(
-            bimap(self.ln, id) if use_cache else self.ln,  # (B, S, E)
-            f_(self.decoder, mask, past_kv=past_kv, use_cache=use_cache),  # (B, S, E)
+            self.ln if cached is None else bimap(self.ln, id),  # (B, S, E)
+            f_(self.decoder, mask, cached=cached),  # (B, S, E)
             _ + pos,  # W_p[:,t]: (B, S, E) + (B, S, E)
             self.wte,  # W_e[:,x(t)]: (B, S) -> (B, S, E)
         )(x)
@@ -48,25 +45,26 @@ class Decoder(nn.Module):
         )
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, mask, x, past_kv=None, use_cache=False):
-        def go(x):
-            cache = []
-            for i, layer in enumerate(self.layers):
-                x, o = layer(
-                    mask,
-                    x,
-                    past_kv=None if past_kv is None else past_kv[i],
-                    use_cache=True,
-                )
-                if use_cache:
-                    cache.append(o)
-            return (x, cache) if use_cache else x
+    def forward(self, mask, x, cached=None):
+        def go(acc, ilayer):
+            x, cached = acc
+            i, layer = ilayer
+            if cached is None:
+                x = layer(mask, x, cached=cached)
+                return x, None
+            else:
+                x, o = layer(mask, x, cached=cached)
+                if len(cached) < len(self.layers):
+                    cached.append(o)
+                else:
+                    cached[i] = o
+                return x, cached
 
         return cf_(
-            bimap(self.dropout, id) if use_cache else self.dropout,
-            go,
+            self.dropout if cached is None else bimap(self.dropout, id),
+            (lambda x: foldl(go, (x, cached), enumerate(self.layers))),
             self.ln,
-        )(x)
+        )
 
 
 class Block(nn.Module):
@@ -94,12 +92,12 @@ class Block(nn.Module):
         self.mlp = MLP(config)
         self.ln_2 = LayerNorm(config.size_embed, bias=config.bias)
 
-    def forward(self, mask, x, past_kv=None, use_cache=False):
+    def forward(self, mask, x, cached=None):
         def sublayer(core, layer_norm):
             def go(x):
                 return cf_(
-                    bimap(layer_norm, id) if use_cache else layer_norm,
-                    bimap(_ + fst(x), id) if use_cache else _ + x,  # residual
+                    layer_norm if cached is None else bimap(layer_norm, id),
+                    _ + x if cached is None else bimap(_ + fst(x), id),  # residual
                     core,  # core-fn
                 )(x)
 
@@ -107,11 +105,11 @@ class Block(nn.Module):
 
         return cf_(
             sublayer(  # feedforward network sub-layer
-                bimap(self.mlp, id) if use_cache else self.mlp,
+                self.mlp if cached is None else bimap(self.mlp, id),
                 self.ln_2,
             ),
             sublayer(  # causal self attention sub-layer
-                f_(self.attn, mask, past_kv=past_kv, use_cache=use_cache),
+                f_(self.attn, mask, cached=cached),
                 self.ln_1,
             ),
         )(x)
@@ -179,9 +177,7 @@ class SelfAttention(nn.Module):
         )
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, mask, x, past_kv=None, use_cache=False):
-        if isinstance(x, tuple):
-            x = fst(x)
+    def forward(self, mask, x, cached=None):
         B, S, E = x.size()  # size_batch, sequence length, size_embed
         N, H = self.config.num_heads, E // self.config.num_heads  # E == (N * H)
 
@@ -190,10 +186,9 @@ class SelfAttention(nn.Module):
         k = k.view(B, S, N, H).transpose(1, 2)  # (B, N, S, H)
         v = v.view(B, S, N, H).transpose(1, 2)  # (B, N, S, H)
 
-        if past_kv is not None:
-            past_k, past_v = past_kv
-            k = torch.cat([past_k, k], dim=2)
-            v = torch.cat([past_v, v], dim=2)
+        if cached:
+            k = torch.cat([fst(cached), k], dim=2)
+            v = torch.cat([snd(cached), v], dim=2)
 
         # Attention(Q,K,V)
         #   = softmax( Q*K^T / sqrt(d_k) ) * V
@@ -202,7 +197,7 @@ class SelfAttention(nn.Module):
         #         // prob @ v: (B, N, S, S) x (B, N, S, H) -> (B, N, S, H)
         #   = attention-weighted value (attention score)
         return cf_(
-            (lambda x: (x, (k, v))) if use_cache else id,
+            id if cached is None else lambda x: (x, (k, v)),
             self.dropout,  # dropout of layer's output
             self.c_proj,  # linear projection
             ob(_.view)(B, S, E),  # (B, S, N, H) -> (B, S, E)

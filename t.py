@@ -33,10 +33,10 @@ print(cyan("Self-Attention"))
 sa = SelfAttention(conf)
 print(sa)
 
-o = sa(mask, y, use_cache=False)
+o = sa(mask, y)
 print(o)
 
-o, (k, v) = sa(mask, y, use_cache=True)
+o, (k, v) = sa(mask, y, cached=[])
 print(o)
 print(k)
 print(v)
@@ -56,50 +56,50 @@ block = Block(conf)
 o = block(mask, y)
 print(o)
 
-o, past_kv = block(mask, y, use_cache=True)
+o, cached = block(mask, y, cached=[])
 print(o)
-print(past_kv)
+print(cached)
 
 print(cyan("Decoder"))
 dec = Decoder(conf)
-o = dec(mask, y, use_cache=False)
+o = dec(mask, y)
 print(o)
+error()
 
-o, past_kv = dec(mask, y, use_cache=True)
+o, cached = dec(mask, y, cached=[])
 print(o)
-print(past_kv)
+print(cached)
 
-o, past_kv = dec(
-    attention_mask(x, size_kv=past_kv[0][0].size(2)),
+o, cached = dec(
+    attention_mask(x, C=len_cached_seq(cached)),
     y,
-    past_kv=past_kv,
-    use_cache=True,
+    cached=cached,
 )
 print(o)
-print(past_kv)
+print(cached)
 
 print(cyan("Transformer"))
 tf = Transformer(conf)
-o = tf(x, use_cache=False)
+o = tf(x)
 print(o)
 
-o, past_kv = tf(x, use_cache=True)
+o, cached = tf(x, cached=[])
 print(purple("o"))
 print(o)
-print(purple("past_kv"))
-print(past_kv)
+print(purple("cached"))
+print(cached)
 
 print(cyan("Text generation"))
 i = md.to_ids("아빠")
-logits, past_kv = md(i, use_cache=True)
+logits, cached = md(i, cached=[])
 y = infer(logits[:, -1, :], 1, 100, 0.9)
 print(i)
 print(logits)
 print(y)
 
 i = torch.cat((i, y), dim=1)
-logits, past_kv = md(i[:, -1:], past_kv=past_kv, use_cache=True)
+logits, cached = md(i[:, -1:], cached=cached)
 print(i)
 print(logits)
-print(past_kv)
+print(cached)
 print(md.chat("아빠"))

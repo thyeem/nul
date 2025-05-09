@@ -6,21 +6,15 @@ from .utils import *
 
 
 @torch.no_grad()
-def process(model, size_seq, temperature, k, p, stopper, x, use_cache=False):
+def process(model, size_seq, temperature, k, p, stopper, x, cached=None):
     """Autoregressive generation process"""
     model.eval()
-    past_kv = None
     count = 0
     for _ in range(size_seq):
-        if use_cache:
-            logits, past_kv = model(
-                x if past_kv is None else x[:, -1:],
-                past_kv=past_kv,
-                use_cache=use_cache,
-            )
-        else:
+        if cached is None:
             logits = model(x)
-
+        else:
+            logits, cached = model(x[:, -1:], cached=cached)
         logits = logits[:, -1, :]
         y = infer(logits, temperature, k, p)
         x = torch.cat((x, y), dim=1)
