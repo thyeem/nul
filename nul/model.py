@@ -42,10 +42,11 @@ class Transformer(nn.Module):
         return cf_(
             with_cache(self.ln),  # (B, S, E), [KV-cache]?
             f_(self.decoder, mask),  # (B, S, E), [KV-cache]?
-            x if cached is None else (x, cached),  # (B, S, E), [KV-cache]?
-            _ + pos,  # _ + W_p[:, t] -> (B, S, E)
-            self.wte,  # W_e[:, x(t)] -> (B, S, E)
-        )(x)
+            with_cache(_ + pos),  # _ + W_p[:, t] -> (B, S, E), [KV-cache]?
+            with_cache(self.wte),  # W_e[:, x(t)] -> (B, S, E), [KV-cache]?
+        )(
+            x if cached is None else (x, cached)  # (B, S), [KV-cache]?
+        )
 
 
 class Decoder(nn.Module):

@@ -243,7 +243,7 @@ class nul(nn.Module):
 
     def forward(self, x):
         """forward '(x, [KV-cache])' instead of 'x' when to use KV-cache"""
-        x = cutoff(x, self.conf.size_block)  # TODO: keep context
+        x = with_cache(f_(cutoff, limit=self.conf.size_block))(x)  # TODO: keep context
         return cf_(
             with_cache(self.lm_head),  # (B, S, E) -> (B, S, V) logits
             f_(self.transformer, ipad=self.tid(pad())),  # (B, S) -> (B, S, E)
@@ -267,6 +267,7 @@ class nul(nn.Module):
         top_k=None,
         top_p=None,
         stopper=None,
+        use_cache=True,
     ):
         """generate a sequence"""
         processor = f_(
@@ -277,6 +278,7 @@ class nul(nn.Module):
             top_k or self.conf.top_k,  # k in top-k filter
             top_p or self.conf.top_p,  # p in nucleus filter
             stopper or self.tid(eot()),  # token-id for early-stop
+            use_cache=use_cache,
         )
         return cf_(
             self.from_ids,
@@ -383,8 +385,8 @@ class nul(nn.Module):
             # device=self.device,
             # )
             mask = None
-            loss = self.get_loss(x, target, mask=mask)
             self.optim.zero_grad(set_to_none=True)
+            loss = self.get_loss(x, target, mask=mask)
             loss.backward()
             self.optim.step()
             if self.when("log"):
@@ -404,4 +406,4 @@ class nul(nn.Module):
         print()
         print(purple("prompt"), prompt)
         print()
-        print(cyan("response"), self.chat(prompt))
+        print(cyan("response"), self.chat(prompt, use_cache=True))

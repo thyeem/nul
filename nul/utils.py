@@ -445,7 +445,7 @@ def len_cached_seq(cached):
            = [(k_1, v_1), ..., (k_N, v_N)]
            = [( k=(B, N, S', H), v=(B, N, S', H) ), ...]
     """
-    return 0 if cached is None else cached[0][0].size(2)
+    return cached[0][0].size(2) if cached else 0
 
 
 @torch.no_grad()

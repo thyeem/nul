@@ -7,19 +7,19 @@ conf = nulconf(
     num_heads=2,
     num_layers=3,
     size_block=5,
-    size_embed=4,
-    size_batch=2,
+    size_embed=6,
+    size_batch=1,
     bias=True,
 )
 md = nul.new(conf=conf)
 
 x = torch.randint(
     conf.size_vocab,
-    (conf.size_batch, conf.size_block),
+    (conf.size_batch, 1),
 )  # (B, S)
 y = torch.randn(
     conf.size_batch,
-    conf.size_block,
+    1,
     conf.size_embed,
 )  # (B, S, E)
 
@@ -80,37 +80,75 @@ o, cached = dec(mask, (y, []))
 print(blue("out"))
 print(o)
 for i in range(len(dec.layers)):
-    print(blue(f"Layer{i+1}"))
-    print(cached[i])
+    print(blue(f"Layer{i+1} K"))
+    print(cached[i][0])
+    print(blue(f"Layer{i+1} V"))
+    print(cached[i][1])
 
-error()
+mask = attention_mask(x, C=len_cached_seq(cached))
+print(blue("mask"))
+print(mask)
 
-o, cached = dec(attention_mask(x, C=len_cached_seq(cached)), y)
+o, cached = dec(mask, (y, cached))
 print(o)
-print(cached)
+print(blue("cached"))
+for i in range(len(dec.layers)):
+    print(blue(f"Layer{i+1} K"))
+    print(cached[i][0])
+    print(blue(f"Layer{i+1} V"))
+    print(cached[i][1])
 
 print(cyan("Transformer"))
 tf = Transformer(conf)
 o = tf(x)
 print(o)
 
-o, cached = tf(x)
-print(purple("o"))
+o, cached = tf((x, []))
+print(blue("out"))
 print(o)
-print(purple("cached"))
-print(cached)
+for i in range(len(tf.decoder.layers)):
+    print(blue(f"Layer{i+1} K"))
+    print(cached[i][0])
+    print(blue(f"Layer{i+1} V"))
+    print(cached[i][1])
+
+o, cached = tf((x, cached))
+print(blue("out"))
+print(o)
+for i in range(len(tf.decoder.layers)):
+    print(blue(f"Layer{i+1} K"))
+    print(cached[i][0])
+    print(blue(f"Layer{i+1} V"))
+    print(cached[i][1])
+
 
 print(cyan("Text generation"))
-i = md.to_ids("아빠")
-logits, cached = md(i)
-y = infer(logits[:, -1, :], 1, 100, 0.9)
-print(i)
+j = "아빠"
+logits, cached = md((md.to_ids(j), []))
+y = infer(logits[:, -1, :], 1.0, 100, 0.9)
+for i in range(len(md.transformer.decoder.layers)):
+    print(blue(f"Layer{i+1} K"))
+    print(cached[i][0])
+    print(blue(f"Layer{i+1} V"))
+    print(cached[i][1])
+print(j, md.to_ids(j))
 print(logits)
-print(y)
+print(md.from_ids(y), y)
 
-i = torch.cat((i, y), dim=1)
-logits, cached = md((i[:, -1:], cached))
-print(i)
+y = torch.cat((md.to_ids(j), y), dim=1)
+logits, cached = md((y[:, -1:], cached))
+q = infer(logits[:, -1, :], 1.0, 100, 0.9)
+for i in range(len(md.transformer.decoder.layers)):
+    print(blue(f"Layer{i+1} K"))
+    print(cached[i][0])
+    print(blue(f"Layer{i+1} V"))
+    print(cached[i][1])
+print(md.from_ids(y), y)
 print(logits)
-print(cached)
-print(md.chat("아빠"))
+print(md.from_ids(q), q)
+
+print(cyan("Text generation (with KV-cache)"))
+print(md.chat(j, use_cache=True))
+
+print(cyan("Text generation (no KV-cache)"))
+print(md.chat(j, use_cache=False))
