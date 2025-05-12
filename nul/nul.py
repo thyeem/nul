@@ -20,37 +20,37 @@ class nulconf(autocast):
     strict: bool = True
     size_vocab: int = 20480
     size_embed: int = 256
-    size_block: int = 128
-    num_layers: int = 6
+    size_block: int = 256
+    num_layers: int = 12
     num_heads: int = 8
-    ratio_ffn: int = 4
+    ratio_ffn: int = 2
     bias: bool = True
     dropout: float = 0.1
     tok: str = "t/byte-tok.json"
     seed: int = 42
     tset: List[str] = field(default_factory=list)
     vset: List[str] = field(default_factory=list)
-    size_batch: int = 8
+    size_batch: int = 16
     size_chat: int = 128
     top_k: int = 100
     top_p: float = 0.9
     temperature: float = 1.0
-    lr: float = 5e-4
-    lr_min: float = 5e-5
-    warmup: int = 100
+    lr: float = 7e-4
+    lr_min: float = 3e-4
+    warmup: int = 1000
     optim: str = "adamw"
-    weight_decay: float = 0.01
+    weight_decay: float = 0.005
     momentum: float = 0.9
     betas: Tuple[float, float] = (0.9, 0.999)
     EOT: float = 1.5
     reset: bool = False
     epoch: int = 1
-    steps: int = 50000
+    steps: int = 100000
     intv_lr: int = 20
     intv_log: int = 20
     intv_shot: int = 100
     intv_val: int = -1
-    intv_ckpt: int = -1
+    intv_ckpt: int = 5000
 
 
 class nul(nn.Module):
@@ -104,7 +104,7 @@ class nul(nn.Module):
                 tok=self.tok.to_str(),
                 model=self.state_dict(),
             ),
-            normpath(name),
+            normpath(path),
         )
         if ckpt:
             mkdir(f"{path}.snap")
@@ -219,9 +219,8 @@ class nul(nn.Module):
         )
 
     def info(self):
-        dumper(dict(self.transformer))
-        dumper(dict(num_params=f"{self.numel:_}"))
-        dumper(self.conf)
+        print(self.transformer)
+        dumper(dict(num_params=f"{self.numel:_}") | asdict(self.conf))
 
     # ------------
     # fundamental
@@ -377,22 +376,16 @@ class nul(nn.Module):
             if self.when("lr"):
                 self.update_lr()
             x, target = next(dl)
-            # mask = context_mask(
-            # target,
-            # self.tid(pad()),
-            # self.tid(eop()),
-            # self.tid(eot()),
-            # device=self.device,
-            # )
-            mask = None
             self.optim.zero_grad(set_to_none=True)
-            loss = self.get_loss(x, target, mask=mask)
+            loss = self.get_loss(x, target)
             loss.backward()
             self.optim.step()
             if self.when("log"):
                 self.log(loss)
             if self.when("shot"):
                 self.shot(context_from_text(next(g), pre=True))
+            if self.when("ckpt"):
+                self.save(ckpt=True)
             self.it += 1
         return self
 
