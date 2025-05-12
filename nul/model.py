@@ -50,8 +50,7 @@ class Decoder(nn.Module):
             x, cached = acc
             i, layer = ilayer
             if cached is None:
-                x = layer(mask, x, cached=cached)
-                return x, None
+                return layer(mask, x)
             else:
                 x, o = layer(mask, x, cached=cached)
                 if len(cached) < len(self.layers):
@@ -62,9 +61,16 @@ class Decoder(nn.Module):
 
         return cf_(
             self.dropout if cached is None else bimap(self.dropout, id),
-            (lambda x: foldl(go, (x, cached), enumerate(self.layers))),
+            # (
+            # lambda x: foldl(
+            # go,
+            # x if cached is None else (x, cached),
+            # enumerate(self.layers),
+            # )
+            # ),
+            # (lambda x: foldl(go, x, enumeratel(self.layers))),
             self.ln,
-        )
+        )(x)
 
 
 class Block(nn.Module):
@@ -103,12 +109,14 @@ class Block(nn.Module):
 
             return go
 
+        # attention = f_(self.attn, mask, cached=cached)
         return cf_(
             sublayer(  # feedforward network sub-layer
                 self.mlp if cached is None else bimap(self.mlp, id),
                 self.ln_2,
             ),
             sublayer(  # causal self attention sub-layer
+                # attention if cached is None else bimap(attention, id),
                 f_(self.attn, mask, cached=cached),
                 self.ln_1,
             ),
