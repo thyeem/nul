@@ -11,7 +11,7 @@ from ouch import *
 from torch import nn
 
 from .inference import *
-from .model import Transformer
+from .model import *
 from .utils import *
 
 
@@ -241,16 +241,12 @@ class nul(nn.Module):
             map(cf_(from_ids(self.tok), ob(_.tolist)())),
         )(torch.unbind(x, dim=0))
 
-    def forward(self, x, cached=None):
-        # TODO: keep context without cut-off
-        x = cutoff(x, self.conf.size_block)
-        return cf_(  # lm-head: (B, S, E) -> (B, S, V) logits
-            self.lm_head if cached is None else bimap(self.lm_head, id),
-            f_(
-                self.transformer,
-                cached=cached,
-                ipad=self.tid(pad()),
-            ),  # Transformer: (B, S) -> (B, S, E)
+    def forward(self, x):
+        """forward '(x, [KV-cache])' instead of 'x' when to use KV-cache"""
+        x = cutoff(x, self.conf.size_block)  # TODO: keep context
+        return cf_(
+            with_cache(self.lm_head),  # (B, S, E) -> (B, S, V) logits
+            f_(self.transformer, ipad=self.tid(pad())),  # (B, S) -> (B, S, E)
         )(x)
 
     @torch.no_grad()
