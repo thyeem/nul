@@ -31,7 +31,6 @@ def infer(logits, temperature, k, p):
     if temperature == 0:
         return logits.argmax(dim=-1, keepdim=True)
     logits /= temperature
-    logits = logits - logits.max(dim=-1, keepdim=True).values
     probs = F.softmax(
         cf_(  # 0 means that the filter is off
             f_(topp, p) if p != 0 else id,

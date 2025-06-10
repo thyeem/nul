@@ -19,32 +19,32 @@ from .utils import *
 class nulconf(autocast):
     strict: bool = True
     size_vocab: int = 20480
-    size_embed: int = 256
-    size_block: int = 256
-    num_layers: int = 12
-    num_heads: int = 8
-    ratio_ffn: int = 2
+    size_embed: int = 512
+    size_block: int = 128
+    num_layers: int = 1
+    num_heads: int = 16
+    ratio_ffn: int = 1
     bias: bool = True
-    dropout: float = 0.1
+    dropout: float = 0.05
     tok: str = "t/byte-tok.json"
     seed: int = 42
     tset: List[str] = field(default_factory=list)
     vset: List[str] = field(default_factory=list)
-    size_batch: int = 16
-    size_chat: int = 128
-    top_k: int = 100
+    size_batch: int = 32
+    size_text: int = 128
+    top_k: int = 50
     top_p: float = 0.9
     temperature: float = 1.0
-    lr: float = 7e-4
-    lr_min: float = 3e-4
+    lr: float = 1e-3
+    lr_min: float = 1e-4
     warmup: int = 1000
-    optim: str = "adamw"
-    weight_decay: float = 0.005
+    optim: str = "adam"
+    weight_decay: float = 0.01
     momentum: float = 0.9
     betas: Tuple[float, float] = (0.9, 0.999)
     EOT: float = 1.5
     reset: bool = False
-    epoch: int = 1
+    epochs: int = 1
     steps: int = 100000
     intv_lr: int = 20
     intv_log: int = 20
@@ -67,6 +67,7 @@ class nul(nn.Module):
             .set_seed()
             .set_tok()
             .set_model()
+            .set_iter()
             .set_optim()
             .into()
             .finalize()
@@ -85,6 +86,7 @@ class nul(nn.Module):
             .set_seed()
             .set_tok(o["tok"])
             .set_model()
+            .set_iter(o["it"])
             .load_model(o["model"])
             .set_optim(o["optim"])
             .finalize()
@@ -115,7 +117,7 @@ class nul(nn.Module):
         return self
 
     def set_conf(self, conf=None, **kwargs):
-        conf = asdict(conf) if conf else {}
+        conf = conf or {}
         self.conf = nulconf(**(conf | kwargs))
         return self
 
@@ -140,6 +142,10 @@ class nul(nn.Module):
         self.transformer = Transformer(self.conf)
         self.lm_head = nn.Linear(self.conf.size_embed, self.conf.size_vocab, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
+        return self
+
+    def set_iter(self, it=0):
+        self.it = 0 if self.conf.reset else it
         return self
 
     def set_optim(self, optim=None):
@@ -258,21 +264,22 @@ class nul(nn.Module):
             f_(self.forward, embedding=True),
         )(x)
 
-    def chat(
+    def invoke(
         self,
         prompt,
-        size_chat=None,
+        size_text=None,
         temperature=None,
         top_k=None,
         top_p=None,
         stopper=None,
         use_cache=True,
+        chat=False,
     ):
         """generate a sequence"""
         processor = f_(
             process,  # text generator
             self,  # model
-            size_chat or self.conf.size_chat,  # length of chat
+            size_text or self.conf.size_text,  # length of text
             temperature or self.conf.temperature,
             top_k or self.conf.top_k,  # k in top-k filter
             top_p or self.conf.top_p,  # p in nucleus filter
@@ -283,7 +290,7 @@ class nul(nn.Module):
             self.from_ids,
             processor,
             self.to_ids,
-        )(prompt)
+        )(eop(prompt) if chat else prompt)
 
     def when(self, x):
         return dict(
@@ -335,8 +342,8 @@ class nul(nn.Module):
         loss *= mask.view(-1)
         return loss.sum() / mask.sum()
 
-    def human_feedback(self, prompt, response, lr=None, steps=None):
-        # TODO: sequence-length
+    def human_feedback(self, src, lr=None, steps=None):
+        prompt, response = src
         t = self.to_ids(eop(prompt) + eot(response))
         x = t[:, :-1]
         target = t[:, 1:]
@@ -348,15 +355,16 @@ class nul(nn.Module):
             device=self.device,
         )
         self.train()
-        self.update_lr(lr or self.conf.lr)
-        print(purple(prompt), prompt)
-        print()
+        self.update_lr(lr or self.conf.lr, lr_min=-1)
+        print(purple("prompt"), prompt)
+        print(f"lr={self._lr:.8f}\n")
         for i in tracker(range(steps or 1), "repeating"):
             self.optim.zero_grad(set_to_none=True)
             loss = self.get_loss(x, target, mask=mask)
             loss.backward()
             self.optim.step()
-            print(cyan(i), self.chat(eop(prompt)))
+            print(cyan(f"response {i+1}"), self.invoke(prompt, chat=True))
+            print(f"loss={loss:.4f}\n")
         return self
 
     def self_supervised(self, src=None):
@@ -370,20 +378,27 @@ class nul(nn.Module):
             device=self.device,
         )
         g = excerptor(src, self.conf.size_block)
-        self.it = 0
-        for _ in tracker(range(self.conf.steps), "reading"):
+        steps = self.conf.steps * self.conf.epochs  # global steps
+        for _ in tracker(range(steps), "reading", start=self.it):
             self.train()
             if self.when("lr"):
                 self.update_lr()
             x, target = next(dl)
+            mask = context_mask(
+                target,
+                self.tid(pad()),
+                self.tid(eop()),
+                self.tid(eot()),
+                device=self.device,
+            )
             self.optim.zero_grad(set_to_none=True)
-            loss = self.get_loss(x, target)
+            loss = self.get_loss(x, target, mask=mask)
             loss.backward()
             self.optim.step()
             if self.when("log"):
                 self.log(loss)
             if self.when("shot"):
-                self.shot(context_from_text(next(g), pre=True))
+                self.shot(context_from_text(next(g), pre=False))
             if self.when("ckpt"):
                 self.save(ckpt=True)
             self.it += 1
@@ -399,4 +414,4 @@ class nul(nn.Module):
         print()
         print(purple("prompt"), prompt)
         print()
-        print(cyan("response"), self.chat(prompt, use_cache=True))
+        print(cyan("response"), self.invoke(prompt, use_cache=True))

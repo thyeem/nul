@@ -153,11 +153,11 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(
             config.size_embed,
-            config.ratio_ffn * config.size_embed,
+            config.size_embed * config.ratio_ffn,
             bias=config.bias,
         )
         self.c_proj = nn.Linear(
-            config.ratio_ffn * config.size_embed,
+            config.size_embed * config.ratio_ffn,
             config.size_embed,
             bias=config.bias,
         )

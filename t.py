@@ -148,7 +148,7 @@ print(logits)
 print(md.from_ids(q), q)
 
 print(cyan("Text generation (with KV-cache)"))
-print(md.chat(j, use_cache=True))
+print(md.invoke(j, use_cache=True))
 
 print(cyan("Text generation (no KV-cache)"))
-print(md.chat(j, use_cache=False))
+print(md.invoke(j, use_cache=False))
