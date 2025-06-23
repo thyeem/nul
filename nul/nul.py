@@ -371,8 +371,8 @@ class nul(nn.Module):
         print(f"  lr  |  {self._lr:.8f}")
         print(f"loss  |  {loss:.4f}")
 
-    def shot(self, prompt):
+    def shot(self, prompt, use_cache=True):
         print()
         print(purple("prompt"), prompt)
         print()
-        print(cyan("response"), self.invoke(prompt, use_cache=True))
+        print(cyan("response"), self.invoke(prompt, use_cache=use_cache))

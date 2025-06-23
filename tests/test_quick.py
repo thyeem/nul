@@ -1,8 +1,7 @@
 import torch
 from foc import *
+from nul import *
 from ouch import *
-
-from ..nul import *
 
 md = nul.new(
     num_heads=2,

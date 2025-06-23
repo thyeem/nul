@@ -1,13 +1,12 @@
 import math
 
 import torch
-from torch.nn import functional as F
-
 from nul import *
+from torch.nn import functional as F
 
 V = 777
 B = 2
-S = 4
+S = 8
 E = 6
 N = 2
 H = 2
@@ -22,7 +21,7 @@ conf = nulconf(
 
 # -----------------------------------------------
 
-x = torch.randint(V, (B, S))
+x = torch.randint(V, (B, 2))
 print("\ntokens")
 print(x)
 
@@ -34,7 +33,7 @@ print(mask)
 
 # -----------------------------------------------
 
-y = torch.randn(B, S, E)
+y = torch.randn(B, 2, E)
 print("\nIN")
 print(y)
 
@@ -103,11 +102,6 @@ assert torch.equal(o, a), "Self-Attention"
 
 a, (k, v) = A(mask, (y, None))
 print(k.shape, v.shape)
-a, (k, v) = A(mask, (y, (k, v)))
-print(k.shape, v.shape)
-a, (k, v) = A(mask, (y, (k, v)))
-print(k.shape, v.shape)
-
 
 # -----------------------------------------------
 
@@ -126,7 +120,7 @@ B = Block(conf)
 B.eval()
 a = B(mask, y)
 print(a)
-o, cached = B(mask, (y, cached))
+o, cached = B(mask, (y, []))
 assert torch.equal(a, o)
 
 # -----------------------------------------------
@@ -143,14 +137,6 @@ print(k.shape)
 print(v.shape)
 assert torch.equal(a, o)
 
-o, cached = D(mask, (y, cached))
-k, v = cached[0]
-print(k.shape)
-print(v.shape)
-assert torch.equal(a, o)
-
-assert conf.num_layers == len(cached)
-
 # -----------------------------------------------
 
 print("\nTransformer")
@@ -162,14 +148,20 @@ print(a)
 
 o, cached = T((x, None))
 assert torch.equal(a, o)
+assert conf.num_layers == len(cached)
 C = len_cached_seq(cached)
-print(C)
-m = attention_mask(x, C=C)
-print(m.shape)
+print(f"Cache length: {C}")
 
-# o, cached = T((x, cached))
-# assert torch.equal(a, o)
-# C = len_cached_seq(cached)
-# print(C)
-# m = attention_mask(x, C=C)
-# print(m.shape)
+o, cached = T((x[:, -1:], cached))
+assert conf.num_layers == len(cached)
+print(f"Out shape: {o.shape}")
+C = len_cached_seq(cached)
+print(f"Cache length: {C}")
+m = attention_mask(x[:, -1:], C=C)
+print(f"Mask shape: {m.shape}")
+
+o, cached = T((x[:, -1:], cached))
+assert conf.num_layers == len(cached)
+print(f"Out shape: {o.shape}")
+C = len_cached_seq(cached)
+print(f"Cache length: {C}")

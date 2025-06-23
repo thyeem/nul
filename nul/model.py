@@ -218,12 +218,9 @@ class SelfAttention(nn.Module):
 
         if use_cache:
             if cached:
-                cached = (
-                    torch.cat([fst(cached), k], dim=2),
-                    torch.cat([snd(cached), v], dim=2),
-                )
-            else:
-                cached = (k, v)
+                k = torch.cat([fst(cached), k], dim=2)
+                v = torch.cat([snd(cached), v], dim=2)
+            cached = (k, v)
 
         # Attention(Q, K, V)
         #   = softmax( Q*K^T / sqrt(d_k) ) * V
