@@ -13,7 +13,7 @@ def process(model, size_seq, temperature, k, p, stopper, x, use_cache=True):
     cached = []
     for _ in range(size_seq):
         if use_cache:
-            logits, cached = model((x[:, -1:] if cached else x, cached))
+            logits, cached = model((x[:, -1:], cached))
         else:
             logits = model(x)
         logits = logits[:, -1, :]

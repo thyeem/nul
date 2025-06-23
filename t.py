@@ -1,9 +1,10 @@
 import torch
 from foc import *
+from ouch import *
 
 from nul import *
 
-conf = nulconf(
+md = nul.new(
     num_heads=2,
     num_layers=3,
     size_block=5,
@@ -11,23 +12,23 @@ conf = nulconf(
     size_batch=1,
     bias=True,
 )
-md = nul.new(conf=conf)
 
 x = torch.randint(
-    conf.size_vocab,
-    (conf.size_batch, 1),
+    md.conf.size_vocab,
+    (md.conf.size_batch, 1),
 )  # (B, S)
 y = torch.randn(
-    conf.size_batch,
+    md.conf.size_batch,
     1,
-    conf.size_embed,
+    md.conf.size_embed,
 )  # (B, S, E)
+
 
 print(x)
 print(y)
 
 print(cyan("MLP"))
-mlp = MLP(conf)
+mlp = MLP(md.conf)
 o = mlp(y)
 print(o)
 
@@ -37,7 +38,7 @@ print(k)
 print(v)
 
 print(cyan("LayerNorm"))
-ln = LayerNorm(conf.size_embed, True)
+ln = LayerNorm(md.conf.size_embed, True)
 o = ln(y)
 print(o)
 
@@ -47,7 +48,7 @@ print(k)
 print(v)
 
 print(cyan("Self-Attention"))
-sa = SelfAttention(conf)
+sa = SelfAttention(md.conf)
 print(sa)
 
 mask = attention_mask(x)
@@ -62,7 +63,7 @@ print(k)
 print(v)
 
 print(cyan("Block"))
-block = Block(conf)
+block = Block(md.conf)
 o = block(mask, y)
 print(o)
 
@@ -72,7 +73,7 @@ print(k)
 print(v)
 
 print(cyan("Decoder"))
-dec = Decoder(conf)
+dec = Decoder(md.conf)
 o = dec(mask, y)
 print(o)
 
@@ -99,7 +100,7 @@ for i in range(len(dec.layers)):
     print(cached[i][1])
 
 print(cyan("Transformer"))
-tf = Transformer(conf)
+tf = Transformer(md.conf)
 o = tf(x)
 print(o)
 

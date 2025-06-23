@@ -1,7 +1,6 @@
 import logging
 import random
-from dataclasses import asdict, dataclass, field
-from typing import List, Tuple
+from dataclasses import asdict
 
 import numpy as np
 import torch
@@ -10,47 +9,10 @@ from foc import *
 from ouch import *
 from torch import nn
 
+from .conf import nulconf
 from .inference import *
 from .model import *
 from .utils import *
-
-
-@dataclass
-class nulconf(autocast):
-    strict: bool = True
-    size_vocab: int = 20480
-    size_embed: int = 512
-    size_block: int = 128
-    num_layers: int = 1
-    num_heads: int = 16
-    ratio_ffn: int = 1
-    bias: bool = True
-    dropout: float = 0.05
-    tok: str = "t/byte-tok.json"
-    seed: int = 42
-    tset: List[str] = field(default_factory=list)
-    vset: List[str] = field(default_factory=list)
-    size_batch: int = 32
-    size_text: int = 128
-    top_k: int = 50
-    top_p: float = 0.9
-    temperature: float = 1.0
-    lr: float = 1e-3
-    lr_min: float = 1e-4
-    warmup: int = 1000
-    optim: str = "adam"
-    weight_decay: float = 0.01
-    momentum: float = 0.9
-    betas: Tuple[float, float] = (0.9, 0.999)
-    EOT: float = 1.5
-    reset: bool = False
-    epochs: int = 1
-    steps: int = 100000
-    intv_lr: int = 20
-    intv_log: int = 20
-    intv_shot: int = 100
-    intv_val: int = -1
-    intv_ckpt: int = 5000
 
 
 class nul(nn.Module):
@@ -82,7 +44,7 @@ class nul(nn.Module):
         return (
             nul()
             .set_name(o["name"])
-            .set_conf(conf=o["conf"], **kwargs)
+            .set_conf(**o["conf"], **kwargs)
             .set_seed()
             .set_tok(o["tok"])
             .set_model()
@@ -117,7 +79,7 @@ class nul(nn.Module):
         return self
 
     def set_conf(self, conf=None, **kwargs):
-        conf = conf or {}
+        conf = read_conf(conf) if conf is not None else {}
         self.conf = nulconf(**(conf | kwargs))
         return self
 
@@ -248,7 +210,7 @@ class nul(nn.Module):
 
     def forward(self, x):
         """forward '(x, [KV-cache])' instead of 'x' when to use KV-cache"""
-        x = with_cache(f_(cutoff, limit=self.conf.size_block))(x)  # TODO: keep context
+        x = with_cache(f_(cutoff, limit=self.conf.size_block))(x)
         return cf_(
             with_cache(self.lm_head),  # (B, S, E) -> (B, S, V) logits
             f_(self.transformer, ipad=self.tid(pad())),  # (B, S) -> (B, S, E)
@@ -367,17 +329,16 @@ class nul(nn.Module):
             print(f"loss={loss:.4f}\n")
         return self
 
-    def self_supervised(self, src=None):
-        src = src or self.conf.src
+    def self_supervised(self):
         dl = batch_from_src(
-            src,
+            self.conf.tset,
             self.conf.size_batch,
             self.conf.size_block,
             self.to_ids,
             ipad=self.tid(pad()),
             device=self.device,
         )
-        g = excerptor(src, self.conf.size_block)
+        g = excerptor(self.conf.tset, self.conf.size_block)
         steps = self.conf.steps * self.conf.epochs  # global steps
         for _ in tracker(range(steps), "reading", start=self.it):
             self.train()
@@ -398,7 +359,7 @@ class nul(nn.Module):
             if self.when("log"):
                 self.log(loss)
             if self.when("shot"):
-                self.shot(context_from_text(next(g), pre=False))
+                self.shot(context_from_text(next(g), pre=True))
             if self.when("ckpt"):
                 self.save(ckpt=True)
             self.it += 1

@@ -28,9 +28,12 @@ class Transformer(nn.Module):
         self.ln = LayerNorm(config.size_embed, bias=config.bias)
 
     def forward(self, x, ipad=0):
-        cached = None
-        if isinstance(x, tuple):
+        use_cache = isinstance(x, tuple)
+        if use_cache:
             x, cached = x
+            cached = cached or []
+        else:
+            cached = None
         B, S = x.size()
         C = len_cached_seq(cached)
         mask = attention_mask(x, C=C, ipad=ipad)  # (B, 1, S, L)
@@ -39,14 +42,13 @@ class Transformer(nn.Module):
             .unsqueeze(0)  # (1, S, E)
             .expand(B, S, -1)  # (B, S, E)
         )
+        x = (x, cached) if use_cache else x  # (B, S), [KV-cache]?
         return cf_(
             with_cache(self.ln),  # (B, S, E), [KV-cache]?
             f_(self.decoder, mask),  # (B, S, E), [KV-cache]?
             with_cache(_ + pos),  # _ + W_p[:, t] -> (B, S, E), [KV-cache]?
             with_cache(self.wte),  # W_e[:, x(t)] -> (B, S, E), [KV-cache]?
-        )(
-            x if cached is None else (x, cached)  # (B, S), [KV-cache]?
-        )
+        )(x)
 
 
 class Decoder(nn.Module):
@@ -61,13 +63,15 @@ class Decoder(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, mask, x):
+        use_cache = isinstance(x, tuple)
+
         def go(x, ilayer):
             i, layer = ilayer
-            if not isinstance(x, tuple):  # when not using KV-cache
+            if not use_cache:
                 return layer(mask, x)
             x, cached = x
             if len(cached) < len(self.layers):
-                x, o = layer(mask, (x, ()))
+                x, o = layer(mask, (x, None))
                 cached.append(o)
             else:
                 x, o = layer(mask, (x, cached[i]))
@@ -200,8 +204,8 @@ class SelfAttention(nn.Module):
 
     def forward(self, mask, x):
         """forward '(x, (..))' instead of 'x' when to use KV-cache"""
-        cached = None
-        if isinstance(x, tuple):
+        use_cache = isinstance(x, tuple)
+        if use_cache:
             x, cached = x
 
         B, S, E = x.size()  # size_batch, sequence length, size_embed
@@ -212,10 +216,14 @@ class SelfAttention(nn.Module):
         k = k.view(B, S, N, H).transpose(1, 2)  # (B, N, S, H)
         v = v.view(B, S, N, H).transpose(1, 2)  # (B, N, S, H)
 
-        if cached:
-            _k, _v = cached
-            k = torch.cat([_k, k], dim=2)
-            v = torch.cat([_v, v], dim=2)
+        if use_cache:
+            if cached:
+                cached = (
+                    torch.cat([fst(cached), k], dim=2),
+                    torch.cat([snd(cached), v], dim=2),
+                )
+            else:
+                cached = (k, v)
 
         # Attention(Q, K, V)
         #   = softmax( Q*K^T / sqrt(d_k) ) * V
@@ -224,7 +232,7 @@ class SelfAttention(nn.Module):
         #         // prob @ v: (B, N, S, S) x (B, N, S, H) -> (B, N, S, H)
         #   = attention-weighted value (attention score)
         return cf_(
-            id if cached is None else lambda x: (x, (k, v)),
+            (lambda x: (x, cached)) if use_cache else id,
             self.dropout,  # dropout of layer's output
             self.c_proj,  # linear projection
             ob(_.view)(B, S, E),  # (B, S, N, H) -> (B, S, E)
