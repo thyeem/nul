@@ -86,7 +86,7 @@ class Decoder(nn.Module):
 
 
 class Block(nn.Module):
-    """Decode block for  decode-only transformer
+    """Decode block for decode-only transformer
     +------------+----------------------------------------+
     | post-norm  |  x = LayerNorm(SelfAttention(x)) + x)  |
     |            |  o = LayerNorm(FFN(x)) + x)            |

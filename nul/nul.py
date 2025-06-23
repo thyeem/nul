@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 from dataclasses import asdict
 
@@ -29,58 +30,67 @@ class nul(nn.Module):
             .set_seed()
             .set_tok()
             .set_model()
-            .set_iter()
-            .set_optim()
-            .into()
-            .finalize()
         )
 
     @classmethod
-    def load(self, name, **kwargs):
+    def load(self, name, conf=None, **kwargs):
         """Load the pre-trained"""
-        path = f"o/{name}"
-        guard(exists(path, "f"), f"Not found model: {name}")
-        o = torch.load(path, map_location="cpu")
+        path = which_model(name)
+        o = torch.load(path, map_location="cpu", weights_only=False)
         return (
             nul()
-            .set_name(o["name"])
-            .set_conf(**o["conf"], **kwargs)
+            .set_name(o.get("name"))
+            .set_conf(conf=conf, **o["conf"], **kwargs)
             .set_seed()
             .set_tok(o["tok"])
             .set_model()
-            .set_iter(o["it"])
             .load_model(o["model"])
-            .set_optim(o["optim"])
+            .set_iter(o.get("it"))
+            .set_stat(o.get("stat"))
+            .set_optim(o.get("optim"))
             .finalize()
         )
 
-    def save(self, name=None, ckpt=False):
-        name = name or self.name
-        path = f"o/{name}"
-        d = dirname(path)
-        mkdir(d)
-        torch.save(
-            dict(
-                name=name,
-                it=self.it,
-                conf=asdict(self.conf) | dict(reset=False),
-                optim=self.optim.state_dict() if self.optim else None,
-                tok=self.tok.to_str(),
-                model=self.state_dict(),
-            ),
-            normpath(path),
+    def save(self, path=None, checkpoint=False):
+        path = path or path_model(self.name)
+        mkdir(dirname(path))
+        obj = dict(
+            name=basename(path),
+            conf=asdict(self.conf),
+            tok=self.tok.to_str(),
+            model=self.state_dict(),
         )
-        if ckpt:
-            mkdir(f"{path}.snap")
-            shell(f"cp -f {path} {path}.snap/{self.it:06d}")
+        if checkpoint:
+            obj |= dict(
+                name=stripext(basename(path)),
+                it=self.it,
+                optim=self.optim.state_dict(),
+                stat=deepdict(self.stat),
+            )
+        torch.save(obj, normpath(path))
+        return path
+
+    def checkpoint(self, best=False, retain=12):
+        if not is_checkpoint(self):
+            die("Error, cannot create a checkpoint")
+        if best:
+            path = path_model(f"{self.name}.ckpt")
+        else:
+            dir = path_model(f"{self.name}.train")
+            mkdir(dir)
+            suffix = f"-{self.stat.valoss:.2f}-{self.it:06d}"
+            path = f"{dir}/{self.name}{suffix}"
+            for f in shell(f"find {dir} -type f | sort -V")[retain:]:
+                os.remove(f)
+        self.save(path=path, checkpoint=True)
 
     def set_name(self, name):
-        self.name = name or base58e(randbytes(5))
+        self.name = name
         return self
 
     def set_conf(self, conf=None, **kwargs):
         conf = read_conf(conf) if conf is not None else {}
-        self.conf = nulconf(**(conf | kwargs))
+        self.conf = nulconf(**(kwargs | dict(conf)))
         return self
 
     def set_seed(self, seed=None):
@@ -97,6 +107,7 @@ class nul(nn.Module):
             self.tok = read_tok(from_json=self.conf.tok)
         else:
             self.tok = read_tok(from_str=from_str)
+        self.conf.size_vocab = self.tok.get_vocab_size()
         self.tid = self.tok.token_to_id
         return self
 
@@ -106,15 +117,28 @@ class nul(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight
         return self
 
-    def set_iter(self, it=0):
-        self.it = 0 if self.conf.reset else it
+    def set_iter(self, it):
+        self.it = self.conf.it or it or 0
+        return self
+
+    def set_stat(self, stat=None):
+        if stat is None:
+            self.stat = dmap(
+                loss=float("inf"),
+                valoss=float("inf"),
+                minloss=float("inf"),
+                alpha=0.1,
+            )
+        else:
+            self.stat = dmap(stat)
+        self.dq = dmap(
+            loss=dataq(self.conf.intv_log),
+            valoss=dataq(self.conf.intv_val),
+        )
+        self.ema = ema(alpha=self.stat.alpha)
         return self
 
     def set_optim(self, optim=None):
-        o = self.conf.optim
-        if not o:
-            self.optim = None
-            return self
         self.optim = dict(
             sgd=torch.optim.SGD(
                 self.transformer.parameters(),
@@ -133,8 +157,8 @@ class nul(nn.Module):
                 lr=self.conf.lr,
                 betas=self.conf.betas,
             ),
-        ).get(o) or error(f"No such optim supported: {o}")
-        if not self.conf.reset and optim:
+        ).get(self.conf.optim or "sgd") or die(f"No such optim supported: {o}")
+        if optim:
             self.optim.load_state_dict(optim)
         return self
 
@@ -152,7 +176,7 @@ class nul(nn.Module):
         dtype = dtype or (
             torch.bfloat16 if torch.cuda.is_available() else torch.float32
         )
-        if hasattr(self.optim, "state"):
+        if hasattr(self, "optim") and hasattr(self.optim, "state"):
             for state in self.optim.state.values():
                 for k, v in state.items():
                     if isinstance(v, torch.Tensor):
@@ -164,8 +188,8 @@ class nul(nn.Module):
 
     def finalize(self):
         torch._dynamo.config.suppress_errors = True
-        torch._logging.set_logs(dynamo=logging.ERROR)
         torch._dynamo.eval_frame.OptimizedModule.__repr__ = self.__repr__
+        torch._logging.set_logs(dynamo=logging.ERROR)
         return self.into().optimize()
 
     def __repr__(self):
@@ -186,9 +210,25 @@ class nul(nn.Module):
             - self.transformer.wpe.weight.numel()
         )
 
-    def info(self):
-        print(self.transformer)
-        dumper(dict(num_params=f"{self.numel:_}") | asdict(self.conf))
+    @property
+    def summary(self):
+        path = path_model(self.name)
+        extra = {"size": du_hs(path), "path": path} if exists(path) else {}
+        return {
+            "model": self.name,
+            "parameters": f"{self.numel:_}",
+            "vocab-size": self.conf.size_vocab,
+            "embedding-size": self.conf.size_embed,
+            "block-size": self.conf.size_block,
+            "num-layers": self.conf.num_layers,
+            "num-heads": self.conf.num_heads,
+            "FFN-ratio": self.conf.ratio_ffn,
+        } | extra
+
+    def info(self, arch=False):
+        if arch:
+            print(self.transformer)
+        dumper(self.summary)
 
     # ------------
     # fundamental
@@ -260,7 +300,7 @@ class nul(nn.Module):
             val=self.it % self.conf.intv_val == 0,
             log=self.it % self.conf.intv_log == 0,
             shot=self.it % self.conf.intv_shot == 0,
-            ckpt=self.it % self.conf.intv_ckpt == 0,
+            checkpoint=self.it % self.conf.intv_ckpt == 0,
         ).get(x, False)
 
     def update_lr(self, lr=None, lr_min=None, steps=None, warmup=None):
@@ -297,79 +337,81 @@ class nul(nn.Module):
             target,
             reduction="mean" if mask is None else "none",
             weight=weight,
-            ignore_index=self.tid(pad()),
         )
         if mask is None:
             return loss
         loss *= mask.view(-1)
         return loss.sum() / mask.sum()
 
-    def human_feedback(self, src, lr=None, steps=None):
-        prompt, response = src
-        t = self.to_ids(eop(prompt) + eot(response))
-        x = t[:, :-1]
-        target = t[:, 1:]
-        mask = context_mask(
-            target,
-            self.tid(pad()),
-            self.tid(eop()),
-            self.tid(eot()),
-            device=self.device,
+    def data_loader(self):
+        return map(
+            lambda x: batch_from_src(
+                x,
+                self.conf.size_batch,
+                self.conf.size_block,
+                self.to_ids,
+                ipad=self.tid(pad()),
+                device=self.device,
+            ),
+            (self.conf.tset, self.conf.vset),
         )
-        self.train()
-        self.update_lr(lr or self.conf.lr, lr_min=-1)
-        print(purple("prompt"), prompt)
-        print(f"lr={self._lr:.8f}\n")
-        for i in tracker(range(steps or 1), "repeating"):
-            self.optim.zero_grad(set_to_none=True)
-            loss = self.get_loss(x, target, mask=mask)
-            loss.backward()
-            self.optim.step()
-            print(cyan(f"response {i+1}"), self.invoke(prompt, chat=True))
-            print(f"loss={loss:.4f}\n")
-        return self
 
     def self_supervised(self):
-        dl = batch_from_src(
-            self.conf.tset,
-            self.conf.size_batch,
-            self.conf.size_block,
-            self.to_ids,
-            ipad=self.tid(pad()),
-            device=self.device,
-        )
+        tl, vl = self.data_loader()  # train-set, validation-set
         g = excerptor(self.conf.tset, self.conf.size_block)
         steps = self.conf.steps * self.conf.epochs  # global steps
-        for _ in tracker(range(steps), "reading", start=self.it):
+        for _ in tracker(range(steps), "supervised", start=self.it):
             self.train()
             if self.when("lr"):
                 self.update_lr()
-            x, target = next(dl)
-            mask = context_mask(
-                target,
-                self.tid(pad()),
-                self.tid(eop()),
-                self.tid(eot()),
-                device=self.device,
+            x, target = next(tl)
+            logits = self(x)
+            loss = F.cross_entropy(
+                logits.contiguous().view(-1, logits.size(-1)),
+                target.contiguous().view(-1),
+                reduction="mean",
             )
             self.optim.zero_grad(set_to_none=True)
-            loss = self.get_loss(x, target, mask=mask)
             loss.backward()
             self.optim.step()
-            if self.when("log"):
-                self.log(loss)
+            self.dq.loss.update(loss.item())
+            if self.when("val"):
+                self.validate(vl)
             if self.when("shot"):
                 self.shot(context_from_text(next(g), pre=True))
-            if self.when("ckpt"):
-                self.save(ckpt=True)
+            if self.when("log"):
+                self.log()
+            if self.when("checkpoint"):
+                self.checkpoint()
             self.it += 1
         return self
 
-    def log(self, loss):
+    @torch.no_grad()
+    def validate(self, vl):
+        self.eval()
+        for _ in tracker(range(self.conf.size_val), "validation"):
+            x, target = next(vl)
+            logits = self(x)
+            loss = F.cross_entropy(
+                logits.contiguous().view(-1, logits.size(-1)),
+                target.contiguous().view(-1),
+                reduction="mean",
+            )
+            self.dq.valoss.update(loss.item())
+        self.stat.valoss = self.ema(self.stat.valoss, self.dq.valoss.median)
+        if self.stat.valoss < self.stat.minloss:
+            self.stat.minloss = self.stat.valoss
+            self.checkpoint(best=True)
+            self.save()
+
+    def log(self):
+        self.stat.loss = self.ema(self.stat.loss, self.dq.loss.median)
+        valmin = f"{self.stat.valoss:.4f} >= {self.stat.minloss:.4f}"
         print()
-        print(f"iter  |  {self.it}")
-        print(f"  lr  |  {self._lr:.8f}")
-        print(f"loss  |  {loss:.4f}")
+        print(f"      STEP  |  {self.it:06d}")
+        print(f"        LR  |  {self._lr:.8f}")
+        print(f" VAL (MIN)  |  {self.dq.valoss.median:.4f} ({valmin})")
+        print(f"LOSS (EMA)  |  {self.dq.loss.median:.4f} ({self.stat.loss:.4f})")
 
     def shot(self, prompt, use_cache=True):
         print()

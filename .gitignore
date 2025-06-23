@@ -33,3 +33,4 @@ dist/
 
 # proj
 o/
+*.conf

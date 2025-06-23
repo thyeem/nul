@@ -1,4 +1,5 @@
 import math
+import os
 import re
 from collections import Counter
 
@@ -308,19 +309,19 @@ def read_tok(from_json=None, from_str=None):
     """read a byte|char BPE tokenizer."""
     if from_json:
         f = normpath(from_json)
-        guard(exists(f), f"not found: {f}")
+        guard(exists(f), f"not found: {f}", e=SystemExit)
         return Tokenizer.from_file(f)
     elif from_str:
         return Tokenizer.from_str(from_str)
     else:
-        error("Error, no given tokenizer to load")
+        die("Error, no given tokenizer to load")
 
 
 def stream(src, from_str=False, jamo=False, size=2 << 12, **ref):
     chunks = flat(
         chunks_str(size, from_str)
         if from_str
-        else (chunks_file(size, f) for f in flat(src))
+        else (chunks_file(size, normpath(f)) for f in flat(src))
     )
     refiner = refine(jamo=jamo, **ref)
     for chunk in chunks:
@@ -431,6 +432,10 @@ def vocab_freq(t, d):
 # ----------
 # nul-utils
 # ----------
+
+PATH_MODEL = f"{dirname(__file__)}/../o"
+
+
 @fx
 def dumper(x, **kwargs):
     print()
@@ -519,6 +524,14 @@ def bleu(refs, x, weights=(0.25, 0.25, 0.25, 0.25), epsilon=1e-12):
     return penalty(refs, x) * np.exp(sigma)
 
 
+@fx
+def ema(prev, new, alpha=0.1):
+    """calculate an exponential moving averages (EMA)"""
+    if prev in (float("inf"), float("-inf")):
+        return new
+    return alpha * new + (1 - alpha) * prev
+
+
 def cutoff(x, limit=0):
     """get the desired length of the last dimension for a given 'torch.Tensor'"""
     return x if x.size(-1) <= limit else x[..., -limit:]
@@ -543,7 +556,11 @@ def sched_lr(it, lr=1e-3, lr_min=1e-5, steps=10000, warmup=100):
     if it > steps:
         return lr_min
     decay_ratio = (it - warmup) / (steps - warmup)
-    guard(0 <= decay_ratio <= 1, f"Error, invalid decay ratio: {decay_ratio}")
+    guard(
+        0 <= decay_ratio <= 1,
+        f"Error, invalid decay ratio: {decay_ratio}",
+        e=SystemExit,
+    )
     return lr_min + 0.5 * (lr - lr_min) * (1.0 + math.cos(math.pi * decay_ratio))
 
 
@@ -555,7 +572,7 @@ def write_memmap(f, o):
 
 
 def read_memmap(f):
-    guard(exists(f, "f"), f"Error, not found memmap file: {f}")
+    guard(exists(f, "f"), f"Error, not found memmap file: {f}", e=SystemExit)
     return np.memmap(f, dtype=np.uint16, mode="r")
 
 
@@ -572,7 +589,10 @@ def tloader(x, batch_size=1, shuffle=True, **kwargs):
 
 
 def excerptor(src, length):
-    fs = [open(f, mode="r", encoding="utf-8", errors="ignore") for f in flat(src)]
+    fs = [
+        reader(normpath(f.strip()), mode="r", encoding="utf-8", errors="ignore")
+        for f in flat(src.split(","))
+    ]
     sizes = [f.seek(0, 2) or f.tell() for f in fs]
     while True:
         i = randint(len(fs))
@@ -630,6 +650,59 @@ def batch_from_src(src, B, W, encoder, ipad=0, device="cpu"):
                 ]
             ),
         )
+
+
+def is_checkpoint(obj):
+    def query(o, k):
+        return hasattr(o, k) or k in o
+
+    if query(obj, "it") and query(obj, "optim") and query(obj, "stat"):
+        return True
+    return False
+
+
+def which_model(name, dir=PATH_MODEL):
+    path = path_model(name, dir=dir)
+    guard(exists(path), f"Error, model '{name}' not found", e=SystemExit)
+    return path
+
+
+def path_model(name, dir=PATH_MODEL):
+    return f"{dir}/{name}"
+
+
+def size_model(name):
+    path = which_model(name)
+    return du_hs(path)
+
+
+def list_models(dir=PATH_MODEL, all=False):
+    def model_name(f):
+        if exists(f):
+            return basename(f)
+        else:
+            die(f"Error, found invalid model path: {f}")
+
+    if all:
+        fs = ls(dir, f=True)
+    else:
+        fs = filter(cf_(not_, ob(_.endswith)(".ckpt")), ls(dir, f=True))
+
+    data = [
+        (
+            model_name(f),
+            du_hs(f),
+            timestamp() - timestamp(os.path.getmtime(f), to_utc=True),
+        )
+        for f in fs
+    ]
+    print(
+        tabulate(
+            [mapl(str.upper, ("name", "size", "modified"))]
+            + [(n, s, timeago(t)) for n, s, t in sort(data, key=nth(3))],
+            nohead=True,
+        ),
+    )
 
 
 def ansicolor(code):
