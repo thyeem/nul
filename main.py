@@ -122,7 +122,7 @@ def main():
     # train
     train_ = subparser.add_parser(
         "train",
-        help="Train a model",
+        help="train a model",
         formatter_class=_help_formatter,
     )
     train_.add_argument(

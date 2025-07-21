@@ -147,9 +147,3 @@ for i in range(len(md.transformer.decoder.layers)):
 print(md.from_ids(y), y)
 print(logits)
 print(md.from_ids(q), q)
-
-print(cyan("Text generation (with KV-cache)"))
-print(md.invoke(j, use_cache=True))
-
-print(cyan("Text generation (no KV-cache)"))
-print(md.invoke(j, use_cache=False))
