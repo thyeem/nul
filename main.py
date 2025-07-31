@@ -79,6 +79,7 @@ def main():
         formatter_class=_help_formatter,
     )
     ls_.add_argument(
+        "-a",
         "--all",
         action="store_true",
         help="include checkpoint models",
@@ -107,6 +108,7 @@ def main():
         formatter_class=_help_formatter,
     )
     show_.add_argument(
+        "-a",
         "--all",
         action="store_true",
         help="display the model architecture",

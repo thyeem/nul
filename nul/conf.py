@@ -9,8 +9,9 @@ class nulconf(autocast):
     size_vocab: int = -1
     size_embed: int = 256
     size_block: int = 128
-    num_layers: int = 6
-    num_heads: int = 4
+    num_layers: int = 3
+    num_heads: int = 2
+    size_mux: int = 1
     ratio_ffn: int = 2
     bias: bool = True
     dropout: float = 0.1

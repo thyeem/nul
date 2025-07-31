@@ -7,7 +7,13 @@ import numpy as np
 import torch
 from foc import *
 from ouch import *
-from tokenizers import ByteLevelBPETokenizer, CharBPETokenizer, Tokenizer
+from tokenizers import (
+    ByteLevelBPETokenizer,
+    Tokenizer,
+    models,
+    pre_tokenizers,
+    trainers,
+)
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -317,9 +323,9 @@ def read_tok(from_json=None, from_str=None):
         die("Error, no given tokenizer to load")
 
 
-def stream(src, from_str=False, jamo=False, size=2 << 12, **ref):
+def stream(src, from_str=False, jamo=False, size=1 << 10, **ref):
     chunks = flat(
-        chunks_str(size, from_str)
+        chunks_str(size, src)
         if from_str
         else (chunks_file(size, normpath(f)) for f in flat(src))
     )
@@ -333,7 +339,7 @@ def train_tok(
     from_str=False,
     byte_level=True,
     size_vocab=5000,
-    size_chunk=2 << 12,
+    size_chunk=1 << 10,
     min_frequency=5,
     dropout=None,
     to_file=None,
@@ -363,24 +369,21 @@ def train_tok(
         )
         return t
 
-    def chartok():
-        t = CharBPETokenizer(
-            unk_token=unk(),
-            bert_normalizer=False,
-            split_on_whitespace_only=True,
-            dropout=dropout,
-        )
+    def jamotok():
+        t = Tokenizer(models.BPE(unk_token=unk()))
+        t.pre_tokenizer = pre_tokenizers.Split(" ", "removed")
         t.train_from_iterator(
             iterator,
-            vocab_size=size_vocab,
-            initial_alphabet=list(charset()),
-            limit_alphabet=len(charset()),
-            min_frequency=min_frequency,
-            special_tokens=special_tokens,
+            trainers.BpeTrainer(
+                vocab_size=size_vocab,
+                min_frequency=min_frequency,
+                special_tokens=special_tokens,
+                continuing_subword_prefix="##",
+            ),
         )
         return t
 
-    tok = bytetok() if byte_level else chartok()
+    tok = bytetok() if byte_level else jamotok()
     to_file and tok.save(normpath(to_file))
     return tok
 
@@ -418,7 +421,14 @@ def from_ids(t):
     valid only when 't' is a 'Tokenizer' instance
     """
     return cf_(
-        id if is_byte_tok(t) else from_jamos,
+        (
+            id
+            if is_byte_tok(t)
+            else cf_(
+                from_jamos,
+                f_(re.sub, " ##", ""),
+            )
+        ),
         lambda x: t.decode(x),
     )
 
@@ -454,7 +464,7 @@ def len_cached_seq(cached):
 
 
 @torch.no_grad()
-def attention_mask(x, C=0, ipad=0):
+def attention_mask(x, C=0, ipad=1):
     """generate a padding-considered causal mask: (B, S) -> (B, 1, S, L)"""
     B, S = x.size()
     L = S + C  # total length including KV-cache squence length (C)
@@ -589,9 +599,17 @@ def tloader(x, batch_size=1, shuffle=True, **kwargs):
 
 
 def excerptor(src, length):
+    el = []
+    for path in flat(x.strip() for x in src.split(",")):
+        if exists(path, "d"):
+            el.extend(ls(path, f=True, r=True))
+        elif exists(path, "f"):
+            el.append(path)
+        else:
+            die(f"Error, invalid source: {path}")
     fs = [
-        reader(normpath(f.strip()), mode="r", encoding="utf-8", errors="ignore")
-        for f in flat(src.split(","))
+        reader(normpath(e.strip()), mode="r", encoding="utf-8", errors="ignore")
+        for e in el
     ]
     sizes = [f.seek(0, 2) or f.tell() for f in fs]
     while True:
@@ -628,7 +646,7 @@ def context_from_text(text, pre=False):
 
 
 @torch.no_grad()
-def batch_from_src(src, B, W, encoder, ipad=0, device="cpu"):
+def batch_from_src(src, B, W, encoder, ipad=1, device="cpu"):
     """get a mini-batch (x[B, W], target[B, W]) from a given source"""
 
     def pad_(t, size, ipad=ipad):

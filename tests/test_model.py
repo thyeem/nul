@@ -1,27 +1,30 @@
 import math
 
 import torch
+from foc import *
 from nul import *
 from torch.nn import functional as F
 
 V = 777
+L = 3
 B = 2
-S = 8
+W = 8
+S = 4
 E = 6
 N = 2
-H = 2
 
 conf = nulconf(
     size_vocab=V,
     size_embed=E,
-    size_block=S,
-    num_layers=N,
-    num_heads=H,
+    size_block=W,
+    size_mux=1,
+    num_layers=L,
+    num_heads=N,
 )
 
 # -----------------------------------------------
 
-x = torch.randint(V, (B, 2))
+x = torch.randint(V, (B, S))
 print("\ntokens")
 print(x)
 
@@ -33,7 +36,7 @@ print(mask)
 
 # -----------------------------------------------
 
-y = torch.randn(B, 2, E)
+y = torch.randn(B, S, E)
 print("\nIN")
 print(y)
 
@@ -45,26 +48,17 @@ M.eval()
 print(M)
 
 
-def mlp(x, cache=False):
-    if cache:
-        x, q = x
+def mlp(x):
     x = M.c_fc(x)
     x = F.gelu(x)
     x = M.c_proj(x)
-    if cache:
-        return x, q
     return x
 
 
-a = M(y)
-print(a)
+a = M(X(y))
+print(a.x)
 o = mlp(y)
-assert torch.equal(o, a), "MLP"
-
-a = M((y, "cache"))
-print(a)
-o = mlp((y, "cache"), cache=True)
-assert torch.equal(o[0], a[0]), "ML-cache"
+assert torch.equal(o, a.x), "MLP"
 
 # -----------------------------------------------
 
@@ -74,7 +68,7 @@ A.eval()
 print(A)
 
 
-def sa(mask, x, cache=False):
+def sa(mask, x):
     B, S, E = x.size()
     N, H = A.config.num_heads, E // A.config.num_heads
 
@@ -95,47 +89,64 @@ def sa(mask, x, cache=False):
     return x
 
 
-a = A(mask, y)
-print(a)
+a = A(X(y, mask=mask, cache=True))
+b = A(X(y, mask=mask, cache=False))
 o = sa(mask, y)
-assert torch.equal(o, a), "Self-Attention"
+print(a.x)
+print(f"(B, S, E) = {a.x.shape}")
+assert torch.equal(o, a.x), "Self-Attention"
+assert torch.equal(a.x, b.x), "Self-Attention W/WO cache"
 
-a, (k, v) = A(mask, (y, None))
-print(k.shape, v.shape)
+k, v = a.cache
+print(k)
+print(v)
+print(f"(B, N, S, H) = {k.shape}")
+print(f"(B, N, S, H) = {v.shape}")
 
 # -----------------------------------------------
 
 print("\nLayerNorm")
-L = LayerNorm(size=conf.size_embed, bias=conf.bias)
-L.eval()
-print(L(a))
-cached = (k, v)
-assert torch.equal(L(a), L((a, cached))[0])
-
+Q = LayerNorm(size=conf.size_embed, bias=conf.bias)
+Q.eval()
+ln = Q(a.x)
+print(ln)
+print(f"(B, S, E) = {ln.shape}")
 
 # -----------------------------------------------
 
 print("\nBlock")
 B = Block(conf)
 B.eval()
-a = B(mask, y)
-print(a)
-o, cached = B(mask, (y, []))
-assert torch.equal(a, o)
+a = B(X(y, mask=mask, cache=True))
+b = B(X(y, mask=mask, cache=False))
+print(a.x)
+assert torch.equal(a.x, b.x)
+print(f"(B, S, E) = {a.x.shape}")
+
+k, v = a.cache
+print(k)
+print(v)
+print(f"(B, N, S, H) = {k.shape}")
+print(f"(B, N, S, H) = {v.shape}")
 
 # -----------------------------------------------
 
 print("\nDecoder")
 D = Decoder(conf)
 D.eval()
-a = D(mask, y)
-print(a)
+a = D(X(y, mask=mask, cache=True))
+b = D(X(y, mask=mask, cache=False))
+print(a.x)
+assert torch.equal(a.x, b.x)
+print(f"(B, S, E) = {a.x.shape}")
 
-o, cached = D(mask, (y, []))
-k, v = cached[0]
-print(k.shape)
-print(v.shape)
-assert torch.equal(a, o)
+print(f"Length of cached = {len(a.cached)}")
+assert len(a.cached) == L, "Block, cached"
+
+for i in range(L):
+    k, v = a.cached[i]
+    print(f"k[{i}]: (B, N, S, H) = {k.shape}")
+    print(f"v[{i}]: (B, N, S, H) = {v.shape}")
 
 # -----------------------------------------------
 
@@ -143,25 +154,34 @@ print("\nTransformer")
 T = Transformer(conf)
 T.eval()
 
-a = T(x)
-print(a)
+a = T(X(x, mask=mask, cache=True))
+b = T(X(x, mask=mask, cache=False))
+print(a.x)
+assert torch.equal(a.x, b.x)
+print(f"(B, S, E) = {a.x.shape}")
 
-o, cached = T((x, None))
-assert torch.equal(a, o)
-assert conf.num_layers == len(cached)
-C = len_cached_seq(cached)
-print(f"Cache length: {C}")
+print(f"Length of cached = {len(a.cached)}")
+assert len(a.cached) == L, "Transformer, cached"
 
-o, cached = T((x[:, -1:], cached))
-assert conf.num_layers == len(cached)
-print(f"Out shape: {o.shape}")
-C = len_cached_seq(cached)
-print(f"Cache length: {C}")
-m = attention_mask(x[:, -1:], C=C)
-print(f"Mask shape: {m.shape}")
+# -----------------------------------------------
 
-o, cached = T((x[:, -1:], cached))
-assert conf.num_layers == len(cached)
-print(f"Out shape: {o.shape}")
-C = len_cached_seq(cached)
-print(f"Cache length: {C}")
+print("Transformer-Level Cache Test")
+
+for _ in range(4):
+    C = len_cached_seq(a.cache)
+    print(f"Sequence length of cached = {C}")
+    o = x[:, -1:]
+    print(o)
+    mask = attention_mask(o, C=C)
+    print(f"mask, {mask.shape}")
+
+    a = T(X(o, mask=mask, cached=a.cached, cache=True))
+    C = len_cached_seq(a.cache)
+    print(f"Sequence length of cached = {C}")
+    assert len(a.cached) == L, "wrong cached length"
+    assert C == L, "wrong cached length"
+    print(f"(B, S, E) = {a.x.shape}")
+    for i in range(L):
+        k, v = a.cached[i]
+        print(f"k[{i}]: (B, N, S, H) = {k.shape}")
+        print(f"v[{i}]: (B, N, S, H) = {v.shape}")

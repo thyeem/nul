@@ -221,6 +221,7 @@ class nul(nn.Module):
             "embedding-size": self.conf.size_embed,
             "block-size": self.conf.size_block,
             "num-layers": self.conf.num_layers,
+            "MUX-size": self.conf.size_mux,
             "num-heads": self.conf.num_heads,
             "FFN-ratio": self.conf.ratio_ffn,
         } | extra
@@ -249,21 +250,23 @@ class nul(nn.Module):
         )(torch.unbind(x, dim=0))
 
     def forward(self, x):
-        """forward '(x, [KV-cache])' instead of 'x' when to use KV-cache"""
-        x = with_cache(f_(cutoff, limit=self.conf.size_block))(x)
+        if not isinstance(x, X):
+            x = X(x)
+        x.x = cutoff(x.x, limit=self.conf.size_block)
         return cf_(
-            with_cache(self.lm_head),  # (B, S, E) -> (B, S, V) logits
+            with_x(self.lm_head),  # (B, S, E) -> (B, S, V) logits
             f_(self.transformer, ipad=self.tid(pad())),  # (B, S) -> (B, S, E)
         )(x)
 
     @torch.no_grad()
     def embed(self, x, mean=True, norm=True):
-        """Get embedding"""
         self.eval()
         return cf_(
             lambda x: x.mean(dim=1) if mean else x,
             f_(normalize, dim=2) if norm else id,
-            f_(self.forward, embedding=True),
+            _.x,
+            f_(self.transformer, ipad=self.tid(pad())),
+            X,
         )(x)
 
     def invoke(
@@ -274,7 +277,6 @@ class nul(nn.Module):
         top_k=None,
         top_p=None,
         stopper=None,
-        use_cache=True,
         chat=False,
     ):
         """generate a sequence"""
@@ -286,13 +288,13 @@ class nul(nn.Module):
             top_k or self.conf.top_k,  # k in top-k filter
             top_p or self.conf.top_p,  # p in nucleus filter
             stopper or self.tid(eot()),  # token-id for early-stop
-            use_cache=use_cache,
         )
+        x = eop(prompt) if chat else prompt
         return cf_(
             self.from_ids,
             processor,
             self.to_ids,
-        )(eop(prompt) if chat else prompt)
+        )(x)
 
     def when(self, x):
         return dict(
@@ -328,21 +330,6 @@ class nul(nn.Module):
         weights[self.tid(eot())] = self.conf.EOT
         return weights
 
-    def get_loss(self, x, target, mask=None, weight=None):
-        logits = self(x)
-        logits = logits.contiguous().view(-1, logits.size(-1))
-        target = target.contiguous().view(-1)
-        loss = F.cross_entropy(
-            logits,
-            target,
-            reduction="mean" if mask is None else "none",
-            weight=weight,
-        )
-        if mask is None:
-            return loss
-        loss *= mask.view(-1)
-        return loss.sum() / mask.sum()
-
     def data_loader(self):
         return map(
             lambda x: batch_from_src(
@@ -365,7 +352,7 @@ class nul(nn.Module):
             if self.when("lr"):
                 self.update_lr()
             x, target = next(tl)
-            logits = self(x)
+            logits = self(x).x
             loss = F.cross_entropy(
                 logits.contiguous().view(-1, logits.size(-1)),
                 target.contiguous().view(-1),
@@ -373,6 +360,7 @@ class nul(nn.Module):
             )
             self.optim.zero_grad(set_to_none=True)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=2.0)
             self.optim.step()
             self.dq.loss.update(loss.item())
             if self.when("val"):
@@ -391,7 +379,7 @@ class nul(nn.Module):
         self.eval()
         for _ in tracker(range(self.conf.size_val), "validation"):
             x, target = next(vl)
-            logits = self(x)
+            logits = self(x).x
             loss = F.cross_entropy(
                 logits.contiguous().view(-1, logits.size(-1)),
                 target.contiguous().view(-1),
@@ -413,8 +401,8 @@ class nul(nn.Module):
         print(f" VAL (MIN)  |  {self.dq.valoss.median:.4f} ({valmin})")
         print(f"LOSS (EMA)  |  {self.dq.loss.median:.4f} ({self.stat.loss:.4f})")
 
-    def shot(self, prompt, use_cache=True):
+    def shot(self, prompt):
         print()
         print(purple("prompt"), prompt)
         print()
-        print(cyan("response"), self.invoke(prompt, use_cache=use_cache))
+        print(cyan("response"), self.invoke(prompt))

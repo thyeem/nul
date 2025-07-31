@@ -2,26 +2,28 @@ import torch
 from foc import *
 from torch.nn import functional as F
 
+from .model import X
 from .utils import *
 
 
 @torch.no_grad()
-def process(model, size_seq, temperature, k, p, stopper, x, use_cache=True):
+def process(model, size_seq, temperature, k, p, stopper, x):
     """Autoregressive generation process"""
     model.eval()
     count = 0
-    cached = []
+    o = X(x)
     for _ in range(size_seq):
-        if use_cache:
-            logits, cached = model((x[:, -1:], cached))
-        else:
-            logits = model(x)
-        logits = logits[:, -1, :]
+        o = model(o)
+        logits = o.x[:, -1, :]
         y = infer(logits, temperature, k, p)
-        x = torch.cat((x, y), dim=1)
-        count += 1
         if stopper and y.item() == stopper:  # early-stop condition
             break
+        x = torch.cat((x, y), dim=1)
+        if o.cached:
+            o = X(y, cached=o.cached)
+        else:
+            o = X(x)
+        count += 1
     return x[..., -count:]
 
 
